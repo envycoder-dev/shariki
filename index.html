@@ -1,0 +1,2165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Шарики</title>
+<style>
+/* шрифт лежит в архиве: игра не должна зависеть от внешних доменов */
+@font-face{
+  font-family:'Montserrat';
+  font-style:normal;
+  font-weight:400 900;
+  font-display:swap;
+  src:url(fonts/montserrat-cyrillic.woff2) format('woff2');
+  unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face{
+  font-family:'Montserrat';
+  font-style:normal;
+  font-weight:400 900;
+  font-display:swap;
+  src:url(fonts/montserrat-latin.woff2) format('woff2');
+  unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+:root{
+  /* палитра */
+  --bg:#000;
+  --glow-center:rgba(120,40,140,.26);
+  --glow-y:44%;           /* центр свечения: игра ставит его точно в центр кругов */
+  --pink:#ff3fa4;
+  --blue:#29b6f6;
+  --green:#35d76a;
+  --gold:#ffd54a;
+  --white:#fff;
+  --dim:rgba(255,255,255,.45);
+  --card-bg:rgba(0,0,0,.55);
+  --panel-bg:rgba(10,10,14,.96);
+  /* размеры */
+  --top-h:64px; --pad:16px;
+  --card-w:148px; --card-h:168px; --card-gap:14px; --card-r:22px;
+  --badge:30px; --bar-w:130px; --bar-h:3px;
+  /* тайминги */
+  --t-fast:.12s; --t-ui:.2s; --t-float:.9s; --t-shake:.3s; --t-level:1.6s;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--white);
+  font-family:'Montserrat',system-ui,-apple-system,sans-serif;
+  height:100dvh; overflow:hidden;
+  -webkit-user-select:none; user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+/* еле заметный радиальный подсвет к центру */
+body::before{
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background:radial-gradient(circle at 50% var(--glow-y), var(--glow-center), transparent 62%);
+}
+#ring{position:fixed; inset:0; z-index:0; pointer-events:none}
+#hud{position:fixed; inset:0; z-index:1; pointer-events:none}
+#hud button,#hud .card{pointer-events:auto}
+#fx{position:fixed; inset:0; z-index:2; pointer-events:none; overflow:hidden}
+/* ---------- верхняя полоса ---------- */
+#topbar{
+  position:fixed; left:0; right:0; top:0; height:var(--top-h);
+  padding:0 var(--pad);
+  display:grid; grid-template-columns:1fr auto 1fr; align-items:center;
+  padding-top:env(safe-area-inset-top);
+}
+#topLeft{display:flex; align-items:center; gap:10px; justify-self:start}
+#topCenter{display:flex; flex-direction:column; align-items:center; gap:6px}
+#topRight{display:flex; flex-direction:column; align-items:flex-end; justify-self:end}
+.icon-btn{
+  width:44px; height:44px; border:none; border-radius:14px;
+  background:rgba(255,255,255,.10); color:var(--white);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; transition:background var(--t-fast) ease, transform var(--t-fast) ease;
+}
+.icon-btn:hover{background:rgba(255,255,255,.18)}
+.icon-btn:active{transform:scale(.94)}
+#levelText{font-size:1.6rem; font-weight:900; letter-spacing:.5px; white-space:nowrap}
+.progress{width:var(--bar-w); height:var(--bar-h); border-radius:2px; background:rgba(255,255,255,.12); overflow:hidden}
+.progress i{display:block; height:100%; width:0; background:var(--pink); transition:width var(--t-ui) ease}
+#balanceRow{display:flex; align-items:center; gap:8px}
+#balance{font-size:2rem; font-weight:900; color:var(--gold); line-height:1; font-variant-numeric:tabular-nums}
+#income{font-size:.8rem; font-weight:600; color:var(--dim); margin-top:2px}
+#coreChip{
+  display:none; align-items:center; height:28px; padding:0 12px; border-radius:14px;
+  border:1px solid rgba(255,213,74,.5); color:var(--gold);
+  font-size:.8rem; font-weight:800; white-space:nowrap;
+}
+#coreChip.on{display:flex}
+/* ---------- ряд карточек ---------- */
+#cards{
+  position:fixed; left:var(--pad); bottom:calc(var(--pad) + env(safe-area-inset-bottom));
+  display:flex; gap:var(--card-gap);
+}
+/* обёртка карточки: бейдж «видео» живёт рядом с кнопкой, а не внутри неё */
+.slot{position:relative; display:block}
+#moneyIco{stroke:var(--green)}
+.card{
+  position:relative; width:var(--card-w); height:var(--card-h);
+  border:2px solid var(--c); border-radius:var(--card-r);
+  background:var(--card-bg); color:var(--white);
+  display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+  padding:12px 8px 10px; cursor:pointer; font-family:inherit;
+  box-shadow:0 0 14px var(--c35), inset 0 0 18px var(--c18);
+  transition:transform var(--t-fast) ease, box-shadow var(--t-fast) ease, opacity var(--t-fast) ease;
+}
+.card[data-kind="ball"]{--c:var(--pink); --c35:rgba(255,63,164,.35); --c18:rgba(255,63,164,.18)}
+.card[data-kind="speed"]{--c:var(--blue); --c35:rgba(41,182,246,.35); --c18:rgba(41,182,246,.18)}
+.card[data-kind="money"]{--c:var(--green); --c35:rgba(53,215,106,.35); --c18:rgba(53,215,106,.18)}
+.card .title{font-size:1.05rem; font-weight:800; line-height:1.05; text-align:center; color:var(--c)}
+.card .ico{width:52px; height:52px; display:flex; align-items:center; justify-content:center; color:var(--c)}
+.card .ico svg{width:52px; height:52px}
+.card .cost{font-size:2rem; font-weight:900; color:var(--gold); font-variant-numeric:tabular-nums}
+.card:hover:not(.off){transform:translateY(-3px); box-shadow:0 0 22px var(--c35), inset 0 0 24px var(--c18)}
+.card.press{transform:scale(.96)}
+.card.off{opacity:.45; box-shadow:none; cursor:not-allowed}
+.card.shake{animation:shake var(--t-shake) ease}
+@keyframes shake{
+  0%{transform:translateX(-10px)} 20%{transform:translateX(10px)}
+  40%{transform:translateX(-6px)} 60%{transform:translateX(6px)}
+  80%{transform:translateX(-3px)} 100%{transform:translateX(0)}
+}
+/* бейдж «смотреть видео»: с подписью, чтобы игрок заранее знал про рекламу и награду */
+.badge{
+  position:absolute; left:0; right:0; top:0; min-height:var(--badge);
+  transform:translateY(-58%); border-radius:9px; padding:3px 6px;
+  border:1px solid rgba(255,255,255,.75); background:rgba(20,20,24,.95);
+  color:var(--white); font-family:inherit; font-size:.56rem; font-weight:800;
+  line-height:1.15; letter-spacing:.2px; text-align:left;
+  display:none; align-items:center; gap:5px; cursor:pointer;
+}
+.badge.on{display:flex}
+.badge.cool{opacity:.35; cursor:not-allowed}
+.badge b{flex:0 0 auto; display:block; width:0; height:0; border-left:8px solid var(--white); border-top:5px solid transparent; border-bottom:5px solid transparent}
+.badge span{flex:1 1 auto; min-width:0}
+/* ---------- престиж ---------- */
+#btnPrestige{
+  position:fixed; left:var(--pad);
+  bottom:calc(var(--pad) + var(--card-h) + 12px + env(safe-area-inset-bottom));
+  display:none; height:44px; padding:0 22px; border-radius:22px;
+  background:transparent; border:2px solid var(--gold); color:var(--gold);
+  font-family:inherit; font-size:1rem; font-weight:800; cursor:pointer;
+  transition:box-shadow var(--t-fast) ease, transform var(--t-fast) ease;
+}
+#btnPrestige.on{display:block}
+#btnPrestige:hover{box-shadow:0 0 18px rgba(255,213,74,.45)}
+#btnPrestige:active{transform:scale(.96)}
+/* ---------- всплывашки и баннеры ---------- */
+.float{
+  position:absolute; transform:translate(-50%,-50%); opacity:0;
+  font-size:1.1rem; font-weight:900; white-space:nowrap; text-shadow:0 2px 10px #000;
+}
+.float.go{animation:floatUp var(--t-float) ease-out forwards}
+@keyframes floatUp{
+  0%{opacity:1; transform:translate(-50%,-50%)}
+  100%{opacity:0; transform:translate(-50%,calc(-50% - 90px))}
+}
+/* баннер уровня по центру экрана */
+#levelBanner{
+  position:absolute; left:50%; top:44%; transform:translate(-50%,-50%) scale(.6);
+  font-size:2.4rem; font-weight:900; letter-spacing:2px; color:var(--white);
+  text-shadow:0 0 24px var(--pink); opacity:0; white-space:nowrap;
+}
+#levelBanner.go{animation:levelPop var(--t-level) ease-out forwards}
+@keyframes levelPop{
+  0%{opacity:0; transform:translate(-50%,-50%) scale(.6)}
+  25%{opacity:1; transform:translate(-50%,-50%) scale(1.15)}
+  100%{opacity:0; transform:translate(-50%,-50%) scale(1.15)}
+}
+/* плашка достижения справа снизу */
+#achToast{
+  position:fixed; right:var(--pad); bottom:calc(var(--pad) + env(safe-area-inset-bottom));
+  max-width:220px; padding:10px 14px; border-radius:14px;
+  border:1px solid rgba(255,213,74,.55); background:var(--panel-bg);
+  font-size:.85rem; font-weight:700; opacity:0; z-index:3;
+  transition:opacity var(--t-ui) ease, transform var(--t-ui) ease;
+  transform:translateY(10px); pointer-events:none;
+}
+#achToast.on{opacity:1; transform:translateY(0)}
+#achToast span{display:block; color:var(--gold); font-size:.7rem; font-weight:800; margin-bottom:2px}
+/* плашка офлайн-дохода сверху по центру */
+#offlineToast{
+  position:fixed; left:50%; top:calc(var(--top-h) + 10px + env(safe-area-inset-top));
+  transform:translateX(-50%); padding:10px 16px; border-radius:14px;
+  border:1px solid rgba(255,255,255,.25); background:var(--panel-bg);
+  font-size:.9rem; font-weight:700; white-space:nowrap; z-index:3;
+  opacity:0; pointer-events:none; transition:opacity var(--t-ui) ease;
+}
+#offlineToast.on{opacity:1}
+#offlineToast b{color:var(--gold)}
+/* ---------- модальные окна ---------- */
+.overlay{
+  position:fixed; inset:0; z-index:4; display:none;
+  align-items:center; justify-content:center; padding:16px;
+  background:rgba(0,0,0,.72);
+}
+.overlay.on{display:flex}
+.panel{
+  width:100%; max-width:420px; max-height:86dvh; overflow-y:auto;
+  padding:18px; border-radius:22px; background:var(--panel-bg);
+  border:1px solid rgba(255,255,255,.14);
+}
+.panel h2{font-size:1.2rem; font-weight:900; margin-bottom:14px}
+.panel h3{font-size:.8rem; font-weight:800; color:var(--dim); margin:16px 0 8px; letter-spacing:1px}
+.row{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; font-size:.9rem}
+.row+.row{border-top:1px solid rgba(255,255,255,.07)}
+.row .k{color:var(--dim)}
+.row .v{font-weight:800; font-variant-numeric:tabular-nums}
+/* тумблер звука */
+.sw{width:48px; height:26px; border-radius:13px; border:none; background:rgba(255,255,255,.16); position:relative; cursor:pointer; transition:background var(--t-ui) ease}
+.sw i{position:absolute; left:3px; top:3px; width:20px; height:20px; border-radius:50%; background:var(--white); transition:left var(--t-ui) ease}
+.sw.on{background:var(--green)}
+.sw.on i{left:25px}
+/* громкость: родной ползунок, но покрашенный под игру */
+.vol{display:flex; align-items:center; gap:10px}
+.vol .v{min-width:42px; text-align:right; color:var(--white)}
+.vol.off .v{color:var(--dim)}
+input[type=range]{
+  -webkit-appearance:none; appearance:none; width:130px; height:20px;
+  background:transparent; cursor:pointer; touch-action:pan-y;
+}
+input[type=range]::-webkit-slider-runnable-track{height:4px; border-radius:2px; background:rgba(255,255,255,.18)}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none; margin-top:-7px;
+  width:18px; height:18px; border:none; border-radius:50%;
+  background:var(--white); box-shadow:0 0 8px rgba(255,255,255,.45);
+}
+input[type=range]::-moz-range-track{height:4px; border-radius:2px; background:rgba(255,255,255,.18)}
+input[type=range]::-moz-range-thumb{
+  width:18px; height:18px; border:none; border-radius:50%;
+  background:var(--white); box-shadow:0 0 8px rgba(255,255,255,.45);
+}
+.vol.off input[type=range]::-webkit-slider-thumb{background:var(--dim); box-shadow:none}
+.vol.off input[type=range]::-moz-range-thumb{background:var(--dim); box-shadow:none}
+input[type=range]:focus-visible{outline:2px solid var(--gold); outline-offset:4px}
+/* список достижений */
+.ach{display:flex; align-items:center; gap:10px; padding:7px 0; font-size:.88rem; color:var(--dim)}
+.ach.got{color:var(--white)}
+.ach em{
+  flex:0 0 18px; width:18px; height:18px; border-radius:6px; font-style:normal;
+  border:1px solid rgba(255,255,255,.3); display:flex; align-items:center; justify-content:center;
+  font-size:.7rem; font-weight:900;
+}
+.ach.got em{border-color:var(--gold); color:var(--gold)}
+/* кнопки в панелях */
+.btn{
+  height:40px; padding:0 18px; border:none; border-radius:20px; cursor:pointer;
+  font-family:inherit; font-size:.9rem; font-weight:800;
+  background:rgba(255,255,255,.12); color:var(--white);
+  transition:background var(--t-fast) ease, transform var(--t-fast) ease;
+}
+.btn:hover{background:rgba(255,255,255,.2)}
+.btn:active{transform:scale(.96)}
+.btn.gold{background:transparent; border:2px solid var(--gold); color:var(--gold)}
+.btn.wide{width:100%; margin-top:14px}
+.btn.small{height:30px; padding:0 12px; font-size:.75rem; color:var(--dim); background:transparent; border:1px solid rgba(255,255,255,.16)}
+.btnRow{display:flex; gap:10px; justify-content:flex-end; margin-top:16px}
+.note{font-size:.75rem; color:var(--dim); margin-top:10px}
+.note.warn{color:var(--gold)}
+#confirmText{font-size:.95rem; line-height:1.4}
+/* видимая рамка фокуса: игра проходится с клавиатуры, и это должно быть видно */
+.card:focus-visible,.badge:focus-visible,.icon-btn:focus-visible,.btn:focus-visible,.sw:focus-visible,#btnPrestige:focus-visible{
+  outline:3px solid var(--gold); outline-offset:3px;
+}
+/* отчёт тестов и симуляции */
+#report{
+  position:fixed; inset:0; z-index:9; display:none; overflow:auto;
+  padding:16px; background:rgba(0,0,0,.94); color:var(--white);
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; line-height:1.5;
+  white-space:pre; -webkit-user-select:text; user-select:text;
+}
+#report.on{display:block}
+#report .ok{color:var(--green)}
+#report .bad{color:#ff5b5b}
+#report .hl{color:var(--gold)}
+/* ---------- ввод ---------- */
+.card,.badge,.icon-btn,.btn,.sw,#btnPrestige{touch-action:manipulation}
+/* ---------- телефоны ---------- */
+@media (max-width:520px){
+  :root{
+    /* ряд из трёх карточек всегда влезает по ширине: считаем от экрана, а не на глаз */
+    --card-w:clamp(96px, calc((100vw - 36px) / 3), 132px);
+    --card-h:clamp(64px, 38vw, 152px);
+    --card-gap:8px; --pad:10px; --bar-w:96px;
+  }
+  #levelText{font-size:1.2rem}
+  #balance{font-size:1.6rem}
+  #income{font-size:.7rem}
+  /* ряд карточек по центру внизу */
+  #cards{left:0; right:0; justify-content:center}
+  #btnPrestige{left:50%; transform:translateX(-50%); height:40px; font-size:.9rem}
+  #btnPrestige:active{transform:translateX(-50%) scale(.96)}
+  .card{padding:8px 4px 7px; border-radius:18px}
+  .card .title{font-size:.86rem}
+  .card .ico,.card .ico svg{width:36px; height:36px}
+  .card .cost{font-size:1.45rem}
+  #levelBanner{font-size:1.8rem}
+  #achToast{max-width:180px; font-size:.78rem}
+}
+/* низкие экраны: карточка не должна съедать полосу с кругами */
+@media (max-height:520px){
+  :root{ --card-h:clamp(52px, 26vh, 120px) }
+  .card .cost{font-size:1.4rem}
+}
+@media (max-height:420px){
+  .card .ico{display:none}
+}
+
+</style>
+</head>
+<body>
+<!-- слой 0: очередь кругов с крутящимися дырками, шарики и частицы уровня -->
+<canvas id="ring"></canvas>
+
+<!-- слой 1: интерфейс -->
+<div id="hud">
+  <div id="topbar">
+    <div id="topLeft">
+      <button class="icon-btn" id="btnSettings" data-i18n-aria="settings" aria-label="Настройки">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2"/>
+          <path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6l1.6-1.6M18 6l1.6-1.6"/>
+        </svg>
+      </button>
+      <div id="coreChip"></div>
+    </div>
+
+    <div id="topCenter">
+      <div id="levelText">Уровень 1</div>
+      <div class="progress"><i id="progFill"></i></div>
+    </div>
+
+    <div id="topRight">
+      <div id="balanceRow">
+        <span id="balance">71</span>
+        <svg id="moneyIco" viewBox="0 0 24 24" width="26" height="26" fill="none"
+             stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <rect x="2.4" y="6" width="19.2" height="12" rx="2.6"/>
+          <circle cx="12" cy="12" r="2.7"/>
+          <path d="M6 9.6v4.8M18 9.6v4.8"/>
+        </svg>
+      </div>
+      <div id="income">0/с</div>
+    </div>
+  </div>
+
+  <!-- три покупки в один ряд слева снизу -->
+  <div id="cards">
+    <div class="slot">
+      <button class="card" data-kind="ball" data-i18n-title="cardBallHint" title="Бросает в круг ещё один шарик">
+        <span class="title" data-i18n-html="cardBall">Создать<br>шарик</span>
+        <span class="ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 7.6v8.8M7.6 12h8.8"/>
+          </svg>
+        </span>
+        <span class="cost" data-cost="ball">262</span>
+      </button>
+      <button class="badge" data-badge="ball"><b></b><span data-i18n="adBall">Реклама → шарик бесплатно</span></button>
+    </div>
+    <div class="slot">
+      <button class="card" data-kind="speed" data-i18n-title="cardSpeedHint" title="Разгоняет шарики: выплаты чаще и мельче">
+        <span class="title" data-i18n-html="cardSpeed">Скорость</span>
+        <span class="ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20V5"/>
+            <path d="M5.5 11.5 12 5l6.5 6.5"/>
+          </svg>
+        </span>
+        <span class="cost" data-cost="speed">209</span>
+      </button>
+      <button class="badge" data-badge="speed"><b></b><span data-i18n="adSpeed">Реклама → скорость бесплатно</span></button>
+    </div>
+
+    <div class="slot">
+      <button class="card" data-kind="money" data-i18n-title="cardMoneyHint" title="Каждая выплата дороже">
+        <span class="title" data-i18n-html="cardMoney">Деньги</span>
+        <span class="ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2.5" y="8.5" width="15" height="9.5" rx="2.2"/>
+            <circle cx="10" cy="13.2" r="2.1"/>
+            <path d="M15.5 5.5h6v6"/>
+            <path d="M21.5 5.5 16 11"/>
+          </svg>
+        </span>
+        <span class="cost" data-cost="money">104</span>
+      </button>
+      <button class="badge" data-badge="money"><b></b><span data-i18n="adMoney">Реклама → деньги бесплатно</span></button>
+    </div>
+  </div>
+
+  <button id="btnPrestige" data-i18n="prestigeBtn">Престиж · +1 ядро</button>
+</div>
+
+<!-- слой 2: всплывашки -->
+<div id="fx">
+  <div id="levelBanner"></div>
+</div>
+
+<div id="offlineToast"></div>
+<div id="achToast"></div>
+<!-- настройки -->
+<div class="overlay" id="mSettings">
+  <div class="panel">
+    <h2 data-i18n="settings">Настройки</h2>
+    <h3 data-i18n="howItWorks">КАК ЭТО РАБОТАЕТ</h3>
+    <div class="note" data-i18n="howText">Шарики прыгают внутри самого маленького круга, а в его стенке есть дырка, и она крутится.
+      Деньги копятся всё время, но приходят на баланс в тот миг, когда шарик проходит сквозь дырку.
+      Этот проход ломает круг: сломанный падает вниз и гаснет, шарик остаётся в игре и сразу берётся
+      за следующий круг, а в самый конец очереди встаёт такой же новый — кругов бесконечно, и все они
+      крутятся по-разному, так что одним попаданием всю очередь не снести.
+      «Создать шарик» бросает внутрь ещё один шарик, «Скорость» разгоняет шарики — выплаты
+      становятся чаще и мельче, «Деньги» делает каждую выплату дороже.
+      Свернули вкладку — игра встаёт на паузу, а за время отсутствия начисляется офлайн-доход:
+      по половинной ставке и не больше чем за 2 часа.</div>
+    <h3 data-i18n="soundCap">ЗВУК</h3>
+    <div class="row">
+      <span class="k" data-i18n="sound">Звук</span>
+      <button class="sw" id="swSound" data-i18n-aria="sound" aria-label="Звук"><i></i></button>
+    </div>
+    <div class="row">
+      <span class="k" data-i18n="volume">Громкость</span>
+      <span class="vol">
+        <input type="range" id="rngVol" min="0" max="100" step="1" value="60" data-i18n-aria="volume" aria-label="Громкость">
+        <span class="v" id="volValue">60%</span>
+      </span>
+    </div>
+    <h3 data-i18n="gameCap">ИГРА</h3>
+    <div class="row">
+      <span class="k" data-i18n="saving">Сохранение</span>
+      <span class="v" id="saveState">включено</span>
+    </div>
+
+    <h3 data-i18n="achCap">ДОСТИЖЕНИЯ</h3>
+    <div id="achList"></div>
+
+    <h3 data-i18n="statsCap">СТАТИСТИКА</h3>
+    <div id="statList"></div>
+
+    <button class="btn wide" id="btnCloseSettings" data-i18n="close">Закрыть</button>
+    <div class="btnRow"><button class="btn small" id="btnReset" data-i18n="resetBtn">Сбросить прогресс</button></div>
+  </div>
+</div>
+
+<!-- своё подтверждение вместо confirm() -->
+<div class="overlay" id="mConfirm">
+  <div class="panel">
+    <div id="confirmText"></div>
+    <div class="btnRow">
+      <button class="btn" id="btnNo" data-i18n="cancel">Отмена</button>
+      <button class="btn gold" id="btnYes">Да</button>
+    </div>
+  </div>
+</div>
+
+<pre id="report"></pre>
+
+<script>
+'use strict';
+/* ШАРИКИ — idle-игра одним файлом.
+   Экономика мультипликативная: каждая покупка умножает доход, а цена растёт быстрее
+   собственного вклада ветки. Поэтому все три ветки остаются полезными всю игру,
+   а прогресс не встаёт на 40-50 шарике, как было бы при линейном приросте.
+   Числа пацинга проверяются встроенным прогоном бота: открыть с ?sim=1. */
+
+/* включено для площадки: SDK грузится сам и при ошибке просто отключается */
+const YANDEX = true;
+
+/* ==== 1. КОНСТАНТЫ БАЛАНСА — единственное место, где живут цифры ==== */
+const CONFIG = {
+  START_MONEY: 71,
+  BASE_INCOME: 20,        // деньги в секунду при нуле покупок
+  BALLS_PER_LEVEL: 5,
+  LEVEL_BONUS: 1.02,      // множитель дохода за каждый уровень выше первого
+  BALL:  { base: 262, costMult: 1.18, gain: 1.06 },
+  SPEED: { base: 209, costMult: 1.22, gain: 1.05 },
+  MONEY: { base: 104, costMult: 1.22, gain: 1.05 },
+  CRIT_CHANCE: 0.10,      // шанс, что покупка шарика даёт два шарика
+  PRESTIGE_AT_LEVEL: 10,
+  CORE_MULT: 1.25,        // множитель дохода за каждое ядро престижа
+  CORE_FREE_BALLS: 5,     // бесплатных шариков за каждое ядро после сброса
+  OFFLINE_CAP_H: 2,       // максимум часов офлайн-дохода
+  OFFLINE_RATE: 0.5,      // и по половинной ставке
+  SAVE_EVERY_MS: 5000,
+  VOL_DEFAULT: 60,        // громкость по умолчанию, проценты
+  SAVE_KEY: 'shariki.save.v1',
+  VERSION: 1,
+  /* круги и шарики */
+  LOOP_PAD: 14,           // отступ кругов от верхней строки и от карточек
+  LOOP_FILL: 0.88,        // насколько внешний круг заполняет свободную полосу
+  RING_SLOTS: 6,          // столько кругов на экране одновременно
+  SLOT_IN: 0.58,          // внутренний круг = внешний * это; внутри него и живут шарики
+  LOOP_WIDTH: 5,          // толщина внутреннего круга — по нему бьются шарики
+  RING_W: 3,              // толщина остальных кругов
+  RING_SPIN: 0.34,        // рад/с у внутреннего круга
+  RING_SPIN_STEP: 0.13,   // каждый следующий круг крутится иначе и в другую сторону
+  GAP_ARC: 0.75,          // ширина дырки в радианах — около 43 градусов
+  GAP_SPREAD: 0.3,        // разброс ширины дырки между кругами
+  SHIFT_SPEED: 26,        // круги съезжают почти мгновенно: шарик сразу занят следующим
+  BREAK_COOL_MS: 140,     // но два круга подряд в один миг не сломать
+  BREAK_MS: 560,          // столько сломанный круг падает и гаснет
+  BREAK_DROP: 0.45,       // начальная скорость падения, в долях внутреннего радиуса
+  BREAK_FALL: 8,          // и ускорение падения — тоже в долях внутреннего радиуса
+  BREAK_PARTS: 14,        // частиц в месте пролома
+  BALL_MAX: 220,          // потолок шариков на экране
+  BALL_R: 0.075,          // радиус шарика = радиус внутреннего круга * это
+  BALL_DENSE: 45,         // после этого числа шарики мельчают, чтобы не слипаться в кашу
+  GRAVITY: 2.2,           // притяжение в долях внутреннего радиуса за секунду в квадрате
+  BOUNCE: 0.985,          // упругость стенки
+  V_MIN: 1.8,             // коридор скорости, в долях внутреннего радиуса в секунду
+  V_MAX: 5.5,
+  JITTER: 0.14,           // разброс угла при отскоке: без него шарик залипает
+  SPEED_STEP: 0.02,       // каждый уровень «Скорости» ускоряет шарики на 2%
+  SPEED_CAP: 60,          // выше этого уровня шарики уже не разгоняются
+  FX_MIN_MS: 90,          // чаще этого выплата не рисуется и не звучит
+  NO_SHADOW_OVER: 100,    // выше этого числа шариков тени выключаются
+  /* визуал и техника */
+  FLASH_MS: 400,          // вспышка нового шарика
+  PARTICLES: 36,          // частиц в эффекте уровня
+  PARTICLE_MS: 1500,
+  FLOAT_POOL: 12,         // переиспользуемые всплывашки
+  UI_EVERY_MS: 100,       // интерфейс обновляется не чаще 10 раз в секунду
+  DT_CAP: 1,              // больше секунды за кадр считаем офлайном
+  ACH_CHECK_MS: 1000,
+  ACH_SHOW_MS: 3000,
+  OFFLINE_SHOW_MS: 4000,
+  REWARD_COOL_MS: 90000,  // кулдаун бейджа «видео» на карточку
+  INTERSTITIAL_MS: 180000 // межстраничная реклама не чаще раза в 3 минуты
+};
+
+/* ==== 1a. ЯЗЫК. Площадка сообщает язык игрока, и весь текст берётся отсюда.
+   Ни одной строки в разметке и в коде мимо t() — иначе перевод разъедется. ==== */
+const STRINGS = {
+  ru: {
+    title: 'Шарики: разбей кольцо',
+    settingsAria: 'Настройки',
+    cardBall: 'Создать<br>шарик', cardSpeed: 'Скорость', cardMoney: 'Деньги',
+    cardBallHint: 'Бросает в круг ещё один шарик',
+    cardSpeedHint: 'Разгоняет шарики: выплаты чаще и мельче',
+    cardMoneyHint: 'Каждая выплата дороже',
+    adBall: 'Реклама → шарик бесплатно',
+    adSpeed: 'Реклама → скорость бесплатно',
+    adMoney: 'Реклама → деньги бесплатно',
+    adAria: 'Посмотреть рекламный видеоролик и получить покупку бесплатно',
+    prestigeBtn: 'Престиж · +1 ядро',
+    levelWord: 'Уровень ', levelBanner: 'УРОВЕНЬ ',
+    perSec: '/с', coresWord: 'ядра: ',
+    crit: 'КРИТ ×2',
+    offline: 'Пока вас не было: ',
+    achCapToast: 'ДОСТИЖЕНИЕ',
+    settings: 'Настройки',
+    howItWorks: 'КАК ЭТО РАБОТАЕТ',
+    howText: 'Шарики прыгают внутри самого маленького круга, а в его стенке есть дырка, и она крутится. '
+      + 'Деньги копятся всё время, но приходят на баланс в тот миг, когда шарик проходит сквозь дырку. '
+      + 'Этот проход ломает круг: сломанный падает вниз и гаснет, шарик остаётся в игре и сразу берётся '
+      + 'за следующий круг, а в самый конец очереди встаёт такой же новый — кругов бесконечно, и все они '
+      + 'крутятся по-разному, так что одним попаданием всю очередь не снести. '
+      + '«Создать шарик» бросает внутрь ещё один шарик, «Скорость» разгоняет шарики — выплаты '
+      + 'становятся чаще и мельче, «Деньги» делает каждую выплату дороже. '
+      + 'Свернули вкладку — игра встаёт на паузу, а за время отсутствия начисляется офлайн-доход: '
+      + 'по половинной ставке и не больше чем за 2 часа.',
+    soundCap: 'ЗВУК', sound: 'Звук', volume: 'Громкость',
+    gameCap: 'ИГРА', saving: 'Сохранение',
+    saveOn: 'включено', saveOff: 'сохранение недоступно',
+    achCap: 'ДОСТИЖЕНИЯ', statsCap: 'СТАТИСТИКА',
+    close: 'Закрыть', resetBtn: 'Сбросить прогресс', cancel: 'Отмена', yes: 'Да',
+    achBall1: 'Первый шарик', achBall10: 'Десять шариков', achBall50: 'Пятьдесят шариков',
+    achMoney10k: 'Баланс 10K', achMoney1m: 'Баланс 1M', achInc1k: 'Доход 1000/с',
+    achPrest1: 'Первый престиж', achCores3: 'Три ядра',
+    statTime: 'Время в игре', statBuys: 'Покупок', statCrits: 'Критов',
+    statPrestiges: 'Престижей', statBalls: 'Шариков за всё время',
+    statRings: 'Сломано кругов', statEarned: 'Заработано за всё время',
+    unitH: ' ч ', unitM: ' мин ', unitS: ' с',
+    prestigeAsk: 'Сбросить забег и забрать ядро? Шарики, «Скорость» и «Деньги» обнулятся, '
+      + 'зато доход навсегда умножается на {mult} за каждое ядро, а за ядро дают {balls} бесплатных шариков.',
+    prestigeYes: 'Престиж',
+    resetAsk1: 'Сбросить прогресс?', resetYes1: 'Дальше',
+    resetAsk2: 'Точно? Исчезнут ядра, статистика и достижения. Это не отменить.',
+    resetYes2: 'Удалить всё'
+  },
+  en: {
+    title: 'Balls: Break the Ring',
+    settingsAria: 'Settings',
+    cardBall: 'Add a<br>ball', cardSpeed: 'Speed', cardMoney: 'Money',
+    cardBallHint: 'Drops one more ball into the ring',
+    cardSpeedHint: 'Speeds the balls up: payouts come more often and smaller',
+    cardMoneyHint: 'Every payout is worth more',
+    adBall: 'Ad → free ball',
+    adSpeed: 'Ad → free speed',
+    adMoney: 'Ad → free money',
+    adAria: 'Watch a video ad and get this upgrade for free',
+    prestigeBtn: 'Prestige · +1 core',
+    levelWord: 'Level ', levelBanner: 'LEVEL ',
+    perSec: '/s', coresWord: 'cores: ',
+    crit: 'CRIT ×2',
+    offline: 'While you were away: ',
+    achCapToast: 'ACHIEVEMENT',
+    settings: 'Settings',
+    howItWorks: 'HOW IT WORKS',
+    howText: 'The balls bounce inside the smallest ring, and there is a gap in its wall that keeps rotating. '
+      + 'Money piles up all the time but lands on your balance the moment a ball slips through the gap. '
+      + 'That pass breaks the ring: the broken one falls down and fades, the ball stays in play and '
+      + 'immediately takes on the next ring, while a fresh one joins the far end of the queue — the rings '
+      + 'never run out, and each spins differently, so one lucky pass will not wipe the whole queue. '
+      + '"Add a ball" throws one more ball in, "Speed" accelerates the balls so payouts get more frequent '
+      + 'and smaller, "Money" makes every payout worth more. '
+      + 'Minimize the tab and the game pauses, while your time away earns offline income: '
+      + 'at half rate and for no more than 2 hours.',
+    soundCap: 'SOUND', sound: 'Sound', volume: 'Volume',
+    gameCap: 'GAME', saving: 'Saving',
+    saveOn: 'on', saveOff: 'saving unavailable',
+    achCap: 'ACHIEVEMENTS', statsCap: 'STATISTICS',
+    close: 'Close', resetBtn: 'Reset progress', cancel: 'Cancel', yes: 'Yes',
+    achBall1: 'First ball', achBall10: 'Ten balls', achBall50: 'Fifty balls',
+    achMoney10k: 'Balance 10K', achMoney1m: 'Balance 1M', achInc1k: 'Income 1000/s',
+    achPrest1: 'First prestige', achCores3: 'Three cores',
+    statTime: 'Time in game', statBuys: 'Purchases', statCrits: 'Crits',
+    statPrestiges: 'Prestiges', statBalls: 'Balls all time',
+    statRings: 'Rings broken', statEarned: 'Earned all time',
+    unitH: 'h ', unitM: 'm ', unitS: 's',
+    prestigeAsk: 'Reset the run and take a core? Balls, "Speed" and "Money" go back to zero, '
+      + 'but your income is multiplied by {mult} for every core forever, and each core grants {balls} free balls.',
+    prestigeYes: 'Prestige',
+    resetAsk1: 'Reset progress?', resetYes1: 'Continue',
+    resetAsk2: 'Are you sure? Cores, statistics and achievements will be gone. This cannot be undone.',
+    resetYes2: 'Delete everything'
+  }
+};
+
+let LANG = 'ru';
+
+/* русский интерфейс для стран, где по-русски играют; всем остальным английский */
+const RU_LANGS = ['ru', 'be', 'uk', 'kk', 'uz', 'ky', 'tg', 'hy', 'az', 'mo'];
+function pickLang(code){
+  const two = String(code || '').toLowerCase().slice(0, 2);
+  return RU_LANGS.indexOf(two) >= 0 ? 'ru' : 'en';
+}
+
+function t(key, params){
+  const dict = STRINGS[LANG] || STRINGS.ru;
+  let s = dict[key];
+  if(s === undefined) s = STRINGS.ru[key];
+  if(s === undefined) return key;
+  if(!params) return s;
+  return s.replace(/\{(\w+)\}/g, function(m, name){
+    return params[name] === undefined ? m : String(params[name]);
+  });
+}
+/* ==== 2. ЧИСТАЯ ЛОГИКА. Ни одного обращения к DOM: этот блок целиком
+   выполняется в node при проверке формул и в прогоне бота. ==== */
+/* --- PURE-BEGIN --- */
+
+/* Новое состояние. Уровень, цены и доход тут не хранятся — они считаются
+   из этих полей, чтобы не было двух источников правды. */
+function createState(){
+  return {
+    version: CONFIG.VERSION,
+    money: CONFIG.START_MONEY,  // дробное внутри, целое при выводе
+    bank: 0,                    // копилка: наливается всё время, отдаётся на вылете шарика
+    balls: 0,                   // куплено шариков в текущем забеге
+    speedLvl: 0,
+    moneyLvl: 0,
+    cores: 0,                   // ядра престижа, при сбросе не теряются
+    lastTick: 0,                // время последнего тика, ставится при старте
+    stats: { playtimeMs: 0, clicks: 0, crits: 0, prestiges: 0,
+             allTimeBalls: 0, allTimeMoney: 0, ringsBroken: 0 },
+    achieved: [],
+    settings: { sound: false, volume: CONFIG.VOL_DEFAULT }
+  };
+}
+
+/* громкость как множитель 0..1: тумблер выключен или ползунок в нуле — тишина */
+function soundGain(s){
+  if(!s.settings.sound) return 0;
+  const v = s.settings.volume;
+  if(typeof v !== 'number' || !isFinite(v)) return 0;
+  return Math.max(0, Math.min(100, Math.round(v))) / 100;
+}
+
+function level(s){
+  return Math.floor(s.balls / CONFIG.BALLS_PER_LEVEL) + 1;
+}
+
+/* Доход в секунду: только произведение множителей, никаких слагаемых. */
+function incomePerSec(s){
+  return CONFIG.BASE_INCOME
+       * Math.pow(CONFIG.CORE_MULT,  s.cores)
+       * Math.pow(CONFIG.BALL.gain,  s.balls)
+       * Math.pow(CONFIG.SPEED.gain, s.speedLvl)
+       * Math.pow(CONFIG.MONEY.gain, s.moneyLvl)
+       * Math.pow(CONFIG.LEVEL_BONUS, level(s) - 1);
+}
+
+function costBall(s){  return Math.floor(CONFIG.BALL.base  * Math.pow(CONFIG.BALL.costMult,  s.balls)); }
+function costSpeed(s){ return Math.floor(CONFIG.SPEED.base * Math.pow(CONFIG.SPEED.costMult, s.speedLvl)); }
+function costMoney(s){ return Math.floor(CONFIG.MONEY.base * Math.pow(CONFIG.MONEY.costMult, s.moneyLvl)); }
+
+function costOf(s, kind){
+  if(kind === 'ball')  return costBall(s);
+  if(kind === 'speed') return costSpeed(s);
+  return costMoney(s);
+}
+
+/* прирост дохода ветки в процентах — для всплывашки на карточке */
+function gainPct(kind){
+  const g = kind === 'ball' ? CONFIG.BALL.gain : kind === 'speed' ? CONFIG.SPEED.gain : CONFIG.MONEY.gain;
+  return Math.round((g - 1) * 100);
+}
+/* прогресс до следующего уровня, 0..100 */
+function progressPct(s){
+  return (s.balls % CONFIG.BALLS_PER_LEVEL) / CONFIG.BALLS_PER_LEVEL * 100;
+}
+
+/* доход после гипотетической покупки — нужен боту в прогоне */
+function incomeAfter(s, kind){
+  const inc = incomePerSec(s);
+  if(kind === 'speed') return inc * CONFIG.SPEED.gain;
+  if(kind === 'money') return inc * CONFIG.MONEY.gain;
+  const lvlUp = (Math.floor((s.balls + 1) / CONFIG.BALLS_PER_LEVEL) + 1) - level(s);
+  return inc * CONFIG.BALL.gain * Math.pow(CONFIG.LEVEL_BONUS, lvlUp);
+}
+
+/* ---- копилка. Деньги начисляются не в баланс, а в копилку, и уходят в баланс
+   целиком в тот миг, когда шарик вылетел через дырку. Средний доход в секунду от
+   этого не меняется ни на копейку: разгон «Скорости» лишь делает выплаты чаще и
+   мельче. Поэтому таблица пацинга и офлайн-доход остаются верными. ---- */
+function accrue(s, dt){
+  s.bank += incomePerSec(s) * dt;
+  return s.bank;
+}
+/* забрать всю копилку в баланс: возвращает выплаченную сумму */
+function cashOut(s){
+  const sum = s.bank;
+  if(sum <= 0) return 0;
+  s.bank = 0;
+  s.money += sum;
+  s.stats.allTimeMoney += sum;
+  return sum;
+}
+
+/* ---- формат чисел: одна функция на баланс, цены и доход ---- */
+const NUM_SUFFIX = ['', 'K', 'M', 'B', 'T'];
+const NUM_ALPHA = 'abcdefghijklmnopqrstuvwxyz';
+
+/* после T идут двухбуквенные aa, ab, ac … затем трёхбуквенные */
+function numSuffix(tier){
+  if(tier < NUM_SUFFIX.length) return NUM_SUFFIX[tier];
+  let i = tier - NUM_SUFFIX.length;
+  let out = '';
+  do { out = NUM_ALPHA[i % 26] + out; i = Math.floor(i / 26) - 1; } while(i >= 0);
+  return out.length < 2 ? 'a' + out : out;
+}
+
+function formatNumber(n){
+  const x = Number(n);
+  if(!isFinite(x)) return '0';
+  const neg = x < 0;
+  let v = Math.abs(x);
+  if(v < 1000) return (neg ? '-' : '') + String(Math.floor(v));
+  let tier = 0;
+  while(v >= 1000 && tier < 120){ v /= 1000; tier++; }
+  let str = v.toFixed(2);
+  if(Number(str) >= 1000 && tier < 120){ v /= 1000; tier++; str = v.toFixed(2); }
+  if(str.indexOf('.') >= 0) str = str.replace(/0+$/, '').replace(/\.$/, '');
+  return (neg ? '-' : '') + str + numSuffix(tier);
+}
+
+/* доход в секунду: пока меньше 100 — с одним знаком после точки */
+function formatRate(v){
+  return v < 100 ? (Math.round(v * 10) / 10).toFixed(1) : formatNumber(v);
+}
+
+/* офлайн-доход считается от ставки, а не от числа тиков */
+function offlineRaw(income, elapsedMs){
+  const sec = Math.min(Math.max(elapsedMs, 0) / 1000, CONFIG.OFFLINE_CAP_H * 3600);
+  return income * sec * CONFIG.OFFLINE_RATE;
+}
+function offlineGain(s, elapsedMs){ return offlineRaw(incomePerSec(s), elapsedMs); }
+/* Покупка. При нехватке денег состояние не меняется ни в одном поле.
+   rnd передаётся снаружи, чтобы прогон бота был детерминированным.
+   free = бесплатная покупка за просмотр рекламы. */
+function buy(s, kind, rnd, free){
+  const cost = costOf(s, kind);
+  if(!free && s.money < cost) return { ok: false, kind: kind, cost: cost, crit: false, free: false };
+  if(!free) s.money -= cost;
+  let crit = false;
+  if(kind === 'ball'){
+    crit = (rnd || Math.random)() < CONFIG.CRIT_CHANCE;   // крит только у шариков
+    const add = crit ? 2 : 1;
+    s.balls += add;
+    s.stats.allTimeBalls += add;
+    if(crit) s.stats.crits++;
+  } else if(kind === 'speed'){
+    s.speedLvl++;
+  } else {
+    s.moneyLvl++;
+  }
+  s.stats.clicks++;
+  return { ok: true, kind: kind, cost: cost, crit: crit, free: !!free };
+}
+
+function canPrestige(s){ return level(s) >= CONFIG.PRESTIGE_AT_LEVEL; }
+
+/* Сброс забега за ядро. Статистика и достижения остаются. */
+function prestige(s){
+  if(!canPrestige(s)) return false;
+  s.cores += 1;
+  s.money = CONFIG.START_MONEY;
+  s.bank = 0;
+  s.speedLvl = 0;
+  s.moneyLvl = 0;
+  s.balls = s.cores * CONFIG.CORE_FREE_BALLS;
+  s.stats.prestiges++;
+  return true;
+}
+
+function coreMult(s){ return Math.pow(CONFIG.CORE_MULT, s.cores); }
+
+/* ---- достижения: id, ключ заголовка, условие ---- */
+const ACHIEVEMENTS = [
+  { id: 'ball1',   key: 'achBall1',    check: function(s){ return s.balls >= 1; } },
+  { id: 'ball10',  key: 'achBall10',   check: function(s){ return s.balls >= 10; } },
+  { id: 'ball50',  key: 'achBall50',   check: function(s){ return s.balls >= 50; } },
+  { id: 'money10k',key: 'achMoney10k', check: function(s){ return s.money >= 1e4; } },
+  { id: 'money1m', key: 'achMoney1m',  check: function(s){ return s.money >= 1e6; } },
+  { id: 'inc1k',   key: 'achInc1k',    check: function(s){ return incomePerSec(s) >= 1000; } },
+  { id: 'prest1',  key: 'achPrest1',   check: function(s){ return s.cores >= 1; } },
+  { id: 'cores3',  key: 'achCores3',   check: function(s){ return s.cores >= 3; } }
+];
+/* ---- сериализация. Чужая или битая запись даёт дефолт, а не исключение ---- */
+function serialize(s){ return JSON.stringify(s); }
+
+function migrate(o){
+  const s = createState();
+  if(!o || typeof o !== 'object') return s;
+  ['money', 'bank', 'balls', 'speedLvl', 'moneyLvl', 'cores', 'lastTick'].forEach(function(k){
+    if(typeof o[k] === 'number' && isFinite(o[k])) s[k] = o[k];
+  });
+  if(o.stats && typeof o.stats === 'object'){
+    Object.keys(s.stats).forEach(function(k){
+      if(typeof o.stats[k] === 'number' && isFinite(o.stats[k])) s.stats[k] = o.stats[k];
+    });
+  }
+  if(Array.isArray(o.achieved)){
+    const ids = ACHIEVEMENTS.map(function(a){ return a.id; });
+    s.achieved = o.achieved.filter(function(x){ return ids.indexOf(x) >= 0; });
+  }
+  if(o.settings && typeof o.settings === 'object'){
+    if(typeof o.settings.sound === 'boolean') s.settings.sound = o.settings.sound;
+    /* громкость из чужой или битой записи приводим к 0..100, а не доверяем как есть */
+    const v = o.settings.volume;
+    if(typeof v === 'number' && isFinite(v)) s.settings.volume = Math.max(0, Math.min(100, Math.round(v)));
+  }
+  return s;
+}
+
+function deserialize(raw){
+  if(typeof raw !== 'string' || !raw) return createState();
+  try { return migrate(JSON.parse(raw)); } catch(e){ return createState(); }
+}
+
+/* ---- прогон бота: покупает то, у чего максимум (прирост дохода / цена) ----
+   Время идёт непрерывно: ждём ровно столько, сколько нужно на покупку. */
+function simulate(hours, opts){
+  const o = opts || {};
+  const s = createState();
+  if(o.cores){ s.cores = o.cores; s.balls = o.cores * CONFIG.CORE_FREE_BALLS; }
+  const kinds = ['ball', 'speed', 'money'];
+  const limit = hours * 3600;
+  const levelAt = {};
+  const gaps = [];
+  let t = 0, purchases = 0, prev = 0, guard = 0;
+  levelAt[level(s)] = 0;
+  while(t < limit && guard++ < 500000){
+    const inc = incomePerSec(s);
+    let best = null;
+    for(let i = 0; i < kinds.length; i++){
+      const k = kinds[i];
+      const cost = costOf(s, k);
+      const ratio = (incomeAfter(s, k) - inc) / cost;
+      if(!best || ratio > best.ratio) best = { kind: k, ratio: ratio, cost: cost };
+    }
+    const need = best.cost - s.money;
+    const wait = need > 0 ? need / inc : 0;
+    if(t + wait > limit) break;
+    t += wait;
+    s.money += inc * wait;
+    buy(s, best.kind, function(){ return 1; });   // в прогоне критов нет
+    purchases++;
+    gaps.push(t - prev);
+    prev = t;
+    const L = level(s);
+    if(levelAt[L] === undefined) levelAt[L] = t;
+  }
+  const sorted = gaps.slice().sort(function(a, b){ return a - b; });
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const worst = sorted.length ? sorted[sorted.length - 1] : 0;
+  return {
+    hours: hours, levelAt: levelAt, purchases: purchases, balls: s.balls,
+    speedLvl: s.speedLvl, moneyLvl: s.moneyLvl, median: median, worst: worst,
+    income: incomePerSec(s), money: s.money, level: level(s)
+  };
+}
+/* --- PURE-END --- */
+
+/* ==== 3. ПЛОЩАДКА. При YANDEX = false всё это заглушки, игра их не замечает.
+   Любая ошибка SDK гасится: платформа не имеет права ронять игру. ==== */
+const Platform = {
+  sdk: null, player: null, rewardedReady: false, lastInterstitial: 0, paused: false,
+  init: function(){
+    if(!YANDEX) return Promise.resolve(false);
+    return new Promise(function(resolve){
+      try {
+        const el = document.createElement('script');
+        el.src = 'https://yandex.ru/games/sdk/v2';
+        el.onload = function(){
+          try {
+            window.YaGames.init().then(function(sdk){
+              Platform.sdk = sdk;
+              Platform.rewardedReady = true;
+              Platform.bindEvents();
+              try {
+                sdk.getPlayer({ scopes: false }).then(function(p){ Platform.player = p; resolve(true); },
+                                                      function(){ resolve(true); });
+              } catch(e){ resolve(true); }
+            }, function(){ resolve(false); });
+          } catch(e){ resolve(false); }
+        };
+        el.onerror = function(){ resolve(false); };
+        document.head.appendChild(el);
+      } catch(e){ resolve(false); }
+    });
+  },
+  /* язык игрока с площадки; при любой осечке остаётся язык браузера */
+  lang: function(){
+    try {
+      const l = this.sdk && this.sdk.environment && this.sdk.environment.i18n && this.sdk.environment.i18n.lang;
+      if(l) return l;
+    } catch(e){}
+    try { return navigator.language || navigator.userLanguage || 'ru'; } catch(e){ return 'ru'; }
+  },
+  /* площадка вправе попросить паузу: рекламная вставка сверху, звонок, сворачивание */
+  bindEvents: function(){
+    try {
+      window.addEventListener('game_api_pause', function(){ Game.adPause(true); });
+      window.addEventListener('game_api_resume', function(){ Game.adPause(false); });
+    } catch(e){}
+  },
+  /* вызывается ровно один раз, когда интерфейс отрисован */
+  loadingReady: function(){
+    try { if(this.sdk && this.sdk.features && this.sdk.features.LoadingAPI) this.sdk.features.LoadingAPI.ready(); } catch(e){}
+  },
+  gameplayStart: function(){
+    try { if(this.sdk && this.sdk.features && this.sdk.features.GameplayAPI) this.sdk.features.GameplayAPI.start(); } catch(e){}
+  },
+  gameplayStop: function(){
+    try { if(this.sdk && this.sdk.features && this.sdk.features.GameplayAPI) this.sdk.features.GameplayAPI.stop(); } catch(e){}
+  },
+  hasRewarded: function(){ return !!(YANDEX && this.sdk && this.rewardedReady); },
+  /* вознаграждённое видео: onReward зовём только при честном просмотре */
+  showRewarded: function(onReward, onClose){
+    if(!this.hasRewarded()){ if(onClose) onClose(); return; }
+    let paid = false;
+    try {
+      this.sdk.adv.showRewardedVideo({ callbacks: {
+        onOpen:    function(){ Game.adPause(true); },
+        onRewarded:function(){ paid = true; },
+        onClose:   function(){ Game.adPause(false); if(paid && onReward) onReward(); if(onClose) onClose(); },
+        onError:   function(){ Game.adPause(false); if(onClose) onClose(); }
+      }});
+    } catch(e){ Game.adPause(false); if(onClose) onClose(); }
+  },
+  /* межстраничная: только на повышении уровня и не чаще раза в 3 минуты */
+  showInterstitial: function(){
+    if(!YANDEX || !this.sdk) return;
+    const now = Date.now();
+    if(now - this.lastInterstitial < CONFIG.INTERSTITIAL_MS) return;
+    this.lastInterstitial = now;
+    try {
+      this.sdk.adv.showFullscreenAdv({ callbacks: {
+        onOpen:  function(){ Game.adPause(true); },
+        onClose: function(){ Game.adPause(false); },
+        onError: function(){ Game.adPause(false); }
+      }});
+    } catch(e){ Game.adPause(false); }
+  },
+  /* сохранение игрока платформы; localStorage остаётся резервным путём */
+  save: function(obj){
+    if(!this.player) return;
+    try { this.player.setData({ save: obj }, false); } catch(e){}
+  },
+  load: function(){
+    if(!this.player) return Promise.resolve(null);
+    try {
+      return this.player.getData(['save']).then(function(d){
+        return d && d.save ? d.save : null;
+      }, function(){ return null; });
+    } catch(e){ return Promise.resolve(null); }
+  }
+};
+
+/* ==== 4. ХРАНИЛИЩЕ. Единственная дверь к записи: в разделе площадки она
+   подменяется облачными данными без правок остального кода. ==== */
+const storage = {
+  ok: true,
+  /* backend вынесен отдельно: так его подменяет и площадка, и проверка ?test=1 */
+  backend: (function(){ try { return window.localStorage; } catch(e){ return null; } })(),
+  get: function(key){
+    try { return storage.backend ? storage.backend.getItem(key) : null; }
+    catch(e){ storage.ok = false; return null; }
+  },
+  set: function(key, val){
+    try { if(!storage.backend) return false; storage.backend.setItem(key, val); return true; }
+    catch(e){ storage.ok = false; return false; }
+  },
+  del: function(key){
+    try { if(!storage.backend) return false; storage.backend.removeItem(key); return true; }
+    catch(e){ storage.ok = false; return false; }
+  }
+};
+if(!storage.backend) storage.ok = false;
+/* ==== 5. ССЫЛКИ НА ЭЛЕМЕНТЫ: ищем один раз при старте.
+   В цикле анимации никаких querySelector и никакой пересборки разметки. ==== */
+const el = {
+  ring: document.getElementById('ring'),
+  topbar: document.getElementById('topbar'),
+  fx: document.getElementById('fx'),
+  levelText: document.getElementById('levelText'),
+  progFill: document.getElementById('progFill'),
+  balance: document.getElementById('balance'),
+  income: document.getElementById('income'),
+  coreChip: document.getElementById('coreChip'),
+  cardsRow: document.getElementById('cards'),
+  btnSettings: document.getElementById('btnSettings'),
+  btnPrestige: document.getElementById('btnPrestige'),
+  levelBanner: document.getElementById('levelBanner'),
+  achToast: document.getElementById('achToast'),
+  offlineToast: document.getElementById('offlineToast'),
+  mSettings: document.getElementById('mSettings'),
+  swSound: document.getElementById('swSound'),
+  rngVol: document.getElementById('rngVol'),
+  volValue: document.getElementById('volValue'),
+  volWrap: document.querySelector('.vol'),
+  saveState: document.getElementById('saveState'),
+  achList: document.getElementById('achList'),
+  statList: document.getElementById('statList'),
+  btnCloseSettings: document.getElementById('btnCloseSettings'),
+  btnReset: document.getElementById('btnReset'),
+  mConfirm: document.getElementById('mConfirm'),
+  confirmText: document.getElementById('confirmText'),
+  btnYes: document.getElementById('btnYes'),
+  btnNo: document.getElementById('btnNo'),
+  report: document.getElementById('report'),
+  cards: {}, costs: {}, badges: {}
+};
+['ball', 'speed', 'money'].forEach(function(k){
+  el.cards[k] = el.cardsRow.querySelector('.card[data-kind="' + k + '"]');
+  el.costs[k] = el.cardsRow.querySelector('[data-cost="' + k + '"]');
+  el.badges[k] = el.cardsRow.querySelector('[data-badge="' + k + '"]');
+});
+
+/* цвета ветвей берём из CSS-переменных, чтобы палитра жила в одном месте */
+const CSSV = getComputedStyle(document.documentElement);
+const BRANCH_COLOR = {
+  ball: CSSV.getPropertyValue('--pink').trim(),
+  speed: CSSV.getPropertyValue('--blue').trim(),
+  money: CSSV.getPropertyValue('--green').trim()
+};
+const GOLD = CSSV.getPropertyValue('--gold').trim();
+
+/* ==== 6. ЗВУК: Web Audio, по умолчанию выключен, контекст создаётся лениво
+   при первом жесте — иначе браузер его блокирует. Вся громкость идёт через один
+   мастер-регулятор, поэтому ползунок в настройках слышен сразу и на уже
+   запущенных звуках, а не только на следующих. ==== */
+const sound = {
+  ctx: null,
+  gain: null,                                 // мастер-громкость: 0..1 из настроек
+  ensure: function(){
+    if(this.ctx || !state.settings.sound) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return;
+      this.ctx = new AC();
+      this.gain = this.ctx.createGain();
+      this.gain.gain.value = soundGain(state);
+      this.gain.connect(this.ctx.destination);
+    } catch(e){ this.ctx = null; this.gain = null; }
+  },
+  /* позвать после любой правки настроек звука */
+  setVolume: function(){
+    if(!this.gain) return;
+    try { this.gain.gain.value = soundGain(state); } catch(e){}
+  },
+  tone: function(freq, dur, type, vol, delay){
+    if(soundGain(state) <= 0) return;
+    this.ensure();
+    const c = this.ctx;
+    if(!c) return;
+    try {
+      if(c.state === 'suspended') c.resume();
+      const t0 = c.currentTime + (delay || 0);
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = type || 'square';
+      osc.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(vol || 0.08, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(this.gain || c.destination);
+      osc.start(t0); osc.stop(t0 + dur + 0.02);
+    } catch(e){}
+  },
+  click: function(crit){ this.tone(crit ? 1180 : 720, 0.05, 'square', 0.07, 0); },
+  pay: function(){ this.tone(1320, 0.06, 'triangle', 0.05, 0); },   // шарик вылетел
+  level: function(){ this.tone(660, 0.12, 'triangle', 0.09, 0); this.tone(990, 0.16, 'triangle', 0.09, 0.11); },
+  deny: function(){ this.tone(110, 0.09, 'sawtooth', 0.05, 0); },
+  mute: function(m){ try { if(this.ctx) this.ctx[m ? 'suspend' : 'resume'](); } catch(e){} }
+};
+
+/* ==== 7. КРУГИ, ШАРИКИ И ЧАСТИЦЫ на одном холсте ====
+   Кругов на экране шесть, у каждого своя дырка и своя скорость вращения, поэтому
+   дырки никогда не выстраиваются в линию. Шарики прыгают внутри самого маленького
+   круга; проход сквозь его дырку ломает этот круг — сломанный падает вниз и гаснет,
+   а очередь тут же передаёт эстафету следующему кругу: шарик никуда не улетает,
+   он остаётся в кругах и сразу принимается искать дырку в новом. В самый конец
+   очереди встаёт такой же новый круг — их бесконечно.
+   Проход и есть момент выплаты: игроку отдаётся всё, что накопилось в копилке с
+   прошлого раза. Средний доход в секунду ровно тот, что в разделе 6, просто на
+   экране он приходит кусками. */
+const ring = {
+  ctx: el.ring.getContext('2d'),
+  w: 0, h: 0, cx: 0, cy: 0,
+  rOut: 0,                                  // радиус самого дальнего круга
+  rPlay: 0,                                 // радиус ближнего круга: это и есть стенка
+  rBall: 6,
+  rings: [],                                // живая очередь, [0] — тот, в котором шарики
+  broken: [],                               // сломанные: падают вниз, гаснут и исчезают
+  balls: [], particles: [], seed: 1, lastFx: 0, lastBreak: 0
+};
+
+/* свой генератор случайных: Math.random в кадре не нужен */
+function rnd(){ ring.seed = (ring.seed * 1664525 + 1013904223) % 4294967296; return ring.seed / 4294967296; }
+
+function ringResize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  ring.w = w; ring.h = h;
+  el.ring.width = Math.round(w * dpr);
+  el.ring.height = Math.round(h * dpr);
+  el.ring.style.width = w + 'px';
+  el.ring.style.height = h + 'px';
+  ring.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  /* круги живут в полосе между верхней строкой и карточками: так шарики никогда
+     не прячутся за интерфейсом, на каком угодно экране и в любом повороте */
+  const pad = CONFIG.LOOP_PAD;
+  let top = pad, bottom = h - pad;
+  const tb = box(el.topbar);
+  if(tb) top = tb.bottom + pad;
+  const cb = box(el.cardsRow), pb = box(el.btnPrestige);
+  if(cb) bottom = cb.top - pad;
+  if(pb) bottom = Math.min(bottom, pb.top - pad);
+  const bandH = Math.max(60, bottom - top);
+  const bandW = Math.max(60, w - pad * 2);
+  ring.cx = w / 2;
+  ring.cy = top + bandH / 2;
+  ring.rOut = Math.min(bandH, bandW) / 2 * CONFIG.LOOP_FILL;
+  ring.rPlay = ring.rOut * CONFIG.SLOT_IN;
+  ring.rBall = ballRadius();
+  document.body.style.setProperty('--glow-y', (ring.cy / h * 100).toFixed(1) + '%');
+  if(!ring.rings.length) initRings();
+}
+/* размеры видимого элемента; спрятанный даёт null и в расчёт не идёт */
+function box(node){
+  if(!node) return null;
+  const r = node.getBoundingClientRect();
+  return (r.width > 0 && r.height > 0) ? r : null;
+}
+
+/* чем больше шариков, тем они мельче: иначе на сотнях круг превращается в кашу */
+function ballRadius(){
+  const n = Math.max(1, ring.balls.length);
+  return Math.max(2.5, ring.rPlay * CONFIG.BALL_R * Math.min(1, Math.sqrt(CONFIG.BALL_DENSE / n)));
+}
+
+/* радиус места в очереди: 0 — ближний круг (стенка), последний — самый дальний */
+function slotR(slot){
+  const step = (ring.rOut - ring.rPlay) / Math.max(1, CONFIG.RING_SLOTS - 1);
+  return ring.rPlay + step * slot;
+}
+
+/* новый круг: свои дырка, скорость и сторона вращения — чтобы дырки не совпадали.
+   Не мгновенный приезжает снаружи последнего места и проявляется на ходу. */
+function makeRing(target, atOnce){
+  const i = Math.max(0, target);
+  return {
+    target: target,
+    slot: atOnce ? target : target + 0.7,        // новый приезжает снаружи
+    gap: rnd() * Math.PI * 2,
+    arc: CONFIG.GAP_ARC * (1 - CONFIG.GAP_SPREAD / 2 + rnd() * CONFIG.GAP_SPREAD),
+    spin: (i % 2 ? -1 : 1) * (CONFIG.RING_SPIN + CONFIG.RING_SPIN_STEP * i * (0.7 + rnd() * 0.6)),
+    tint: rnd(), born: 0, dead: 0, r: 0, dy: 0, vy: 0
+  };
+}
+
+function initRings(){
+  ring.rings.length = 0;
+  ring.broken.length = 0;
+  ring.lastBreak = 0;
+  for(let i = 0; i < CONFIG.RING_SLOTS; i++) ring.rings.push(makeRing(i, true));
+}
+
+/* круги подтягиваются к своим местам и вращают дырки, а сломанные падают вниз */
+function stepRings(now, dt){
+  const k = Math.min(1, CONFIG.SHIFT_SPEED * dt);
+  for(let i = 0; i < ring.rings.length; i++){
+    const r = ring.rings[i];
+    r.slot += (r.target - r.slot) * k;
+    if(Math.abs(r.target - r.slot) < 0.002) r.slot = r.target;
+    r.gap += r.spin * dt;
+    if(r.gap > Math.PI * 2) r.gap -= Math.PI * 2;
+    else if(r.gap < 0) r.gap += Math.PI * 2;
+  }
+  if(ring.broken.length){
+    const fall = ring.rPlay * CONFIG.BREAK_FALL;
+    const keep = [];
+    for(let i = 0; i < ring.broken.length; i++){
+      const d = ring.broken[i];
+      d.vy += fall * dt;                     // падает всё быстрее
+      d.dy += d.vy * dt;
+      d.gap += d.spin * dt;                  // и по инерции ещё вращается
+      if(now - d.dead < CONFIG.BREAK_MS) keep.push(d);
+    }
+    ring.broken = keep;
+  }
+}
+
+/* затвор: два круга в один миг одним шариком не сломать, иначе очередь снесло бы
+   разом. Дальше выплаты ограничивает только время — деньги от этого не зависят. */
+function canBreak(now){
+  return ring.rings.length > 0 && now - ring.lastBreak >= CONFIG.BREAK_COOL_MS;
+}
+
+/* круг сломан: он падает вниз и гаснет, очередь сразу съезжает внутрь и стенкой
+   шарику становится следующий круг, а в самый конец встаёт такой же новый */
+function breakRing(x, y, now){
+  const dead = ring.rings.shift();
+  if(dead){
+    dead.r = slotR(dead.slot);
+    dead.dead = now;
+    dead.dy = 0;
+    dead.vy = ring.rPlay * CONFIG.BREAK_DROP;
+    ring.broken.push(dead);
+  }
+  for(let i = 0; i < ring.rings.length; i++) ring.rings[i].target = i;
+  ring.rings.push(makeRing(CONFIG.RING_SLOTS - 1, false));
+  ring.lastBreak = now;
+  state.stats.ringsBroken++;
+  burstAt(x, y, CONFIG.BREAK_PARTS, 90, 170);
+}
+
+/* «Скорость» разгоняет сами шарики: вылетов становится больше и они мельче */
+function speedFactor(){
+  return 1 + Math.min(state.speedLvl, CONFIG.SPEED_CAP) * CONFIG.SPEED_STEP;
+}
+
+/* шарик летит в координатах от центра, поэтому не зависит от размера окна */
+function makeBall(flash){
+  const b = { x: 0, y: 0, vx: 0, vy: 0, tint: rnd(), born: 0 };
+  spawnBall(b, flash ? performance.now() : 0);
+  return b;
+}
+
+/* шариков в круге = 1 + купленные: один есть всегда, иначе выплат не будет вовсе */
+function syncBalls(flash){
+  const target = Math.min(1 + state.balls, CONFIG.BALL_MAX);
+  while(ring.balls.length < target) ring.balls.push(makeBall(flash));
+  if(ring.balls.length > target) ring.balls.length = target;
+  ring.rBall = ballRadius();
+}
+
+/* бросок из центра в случайную сторону */
+function spawnBall(b, now){
+  const ang = rnd() * Math.PI * 2;
+  const sp = ring.rPlay * (CONFIG.V_MIN + rnd() * 0.4) * speedFactor();
+  b.x = 0; b.y = 0;
+  b.vx = Math.cos(ang) * sp;
+  b.vy = Math.sin(ang) * sp;
+  b.born = now || 0;
+}
+
+/* попал ли угол в дырку ближнего круга */
+function inGap(ang){
+  const a = ring.rings[0];
+  if(!a) return false;
+  let d = ang - a.gap;
+  while(d > Math.PI) d -= Math.PI * 2;
+  while(d < -Math.PI) d += Math.PI * 2;
+  return Math.abs(d) <= a.arc / 2;
+}
+
+/* выплата: всё, что накопилось с прошлого прохода сквозь дырку */
+function payout(b, now){
+  const sum = cashOut(state);
+  if(sum >= 1 && now - ring.lastFx > CONFIG.FX_MIN_MS){
+    ring.lastFx = now;
+    spawnFloat(ring.cx + b.x, ring.cy + b.y, '+' + formatNumber(Math.floor(sum)), GOLD);
+    sound.pay();
+  }
+}
+
+function stepBalls(now, dt){
+  const wall = ring.rings.length ? slotR(ring.rings[0].slot) : ring.rPlay;
+  const R = Math.max(ring.rBall + 1, wall - ring.rBall);   // по этому радиусу катается центр шарика
+  const sf = speedFactor();
+  const g = ring.rPlay * CONFIG.GRAVITY * sf;
+  const vMax = ring.rPlay * CONFIG.V_MAX * sf;
+  const vMin = ring.rPlay * CONFIG.V_MIN * sf;
+  for(let i = 0; i < ring.balls.length; i++){
+    const b = ring.balls[i];
+    b.vy += g * dt;
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    const d = Math.sqrt(b.x * b.x + b.y * b.y);
+    if(d < R) continue;
+    const ang = Math.atan2(b.y, b.x);
+    if(inGap(ang) && canBreak(now)){
+      /* шарик прошёл сквозь дырку — круг сломан. Сам шарик никуда не улетает:
+         сломанный круг падает вниз, стенкой шарику сразу становится следующий,
+         очередь съезжает внутрь и снова забирает шарик в себя. Дырку — искать заново. */
+      payout(b, now);
+      breakRing(ring.cx + b.x, ring.cy + b.y, now);
+      continue;
+    }
+    /* упругий отскок от стенки */
+    const nx = b.x / d, ny = b.y / d;
+    const vn = b.vx * nx + b.vy * ny;
+    let vx = (b.vx - 2 * vn * nx) * CONFIG.BOUNCE;
+    let vy = (b.vy - 2 * vn * ny) * CONFIG.BOUNCE;
+    /* мелкая случайность в угле: без неё шарик залипает на одной траектории и дырку не находит */
+    const jit = (rnd() - 0.5) * CONFIG.JITTER;
+    const cs = Math.cos(jit), sn = Math.sin(jit);
+    b.vx = vx * cs - vy * sn;
+    b.vy = vx * sn + vy * cs;
+    b.x = nx * (R - 0.5); b.y = ny * (R - 0.5);
+    /* скорость держим в коридоре: шарик не замирает и не превращается в пулю */
+    const sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy) || 1;
+    const cl = sp < vMin ? vMin / sp : (sp > vMax ? vMax / sp : 1);
+    if(cl !== 1){ b.vx *= cl; b.vy *= cl; }
+  }
+}
+
+function arcColor(tint, alpha){
+  const g = Math.round(122 + (255 - 122) * tint);
+  const b = Math.round(224 + (255 - 224) * tint);
+  return 'rgba(255,' + g + ',' + b + ',' + alpha + ')';
+}
+
+/* frozen — кадр на паузе: рисуем то же самое, но время в игре не идёт */
+function drawRing(now, dt, frozen){
+  const c = ring.ctx;
+  c.clearRect(0, 0, ring.w, ring.h);
+  if(!frozen){
+    stepRings(now, dt);
+    stepBalls(now, dt);
+  }
+  const shadows = ring.balls.length <= CONFIG.NO_SHADOW_OVER;  // тени душат кадры на сотнях объектов
+  c.globalCompositeOperation = 'lighter';
+  drawRings(c, now, shadows);
+  drawBalls(c, now, shadows);
+  drawParticles(c, now, frozen ? 0 : dt);
+  c.globalCompositeOperation = 'source-over';
+  c.shadowBlur = 0;
+  c.setLineDash([]);
+}
+
+/* очередь кругов: ближний яркий и толстый, дальние тусклее; плюс падение сломанных */
+function drawRings(c, now, shadows){
+  const step = (ring.rOut - ring.rPlay) / Math.max(1, CONFIG.RING_SLOTS - 1);
+  const thin = Math.max(0.55, Math.min(1, step / 13));   // тесная полоса — линии тоньше, иначе каша
+  c.save();
+  c.translate(ring.cx, ring.cy);
+  c.setLineDash([]);
+  c.lineCap = 'round';
+  for(let i = ring.rings.length - 1; i >= 0; i--){
+    const a = ring.rings[i];
+    const r = slotR(a.slot);
+    const near = (i === 0);
+    const half = a.arc / 2;
+    const fade = Math.max(0, 1 - Math.max(0, a.slot - a.target) * 1.15);   // новый проявляется на подъезде
+    const alpha = (near ? 0.95 : 0.26 + 0.16 * (1 - i / CONFIG.RING_SLOTS)) * fade;
+    if(alpha <= 0.01) continue;
+    c.beginPath();
+    c.arc(0, 0, r, a.gap + half, a.gap - half + Math.PI * 2);
+    c.lineWidth = (near ? CONFIG.LOOP_WIDTH : CONFIG.RING_W) * thin;
+    c.strokeStyle = arcColor(near ? 0.15 : a.tint, alpha);
+    if(shadows){ c.shadowBlur = (near ? 18 : 7) * thin; c.shadowColor = arcColor(near ? 0 : a.tint, alpha); }
+    else { c.shadowBlur = 0; }
+    c.stroke();
+    if(!near) continue;
+    /* белые губы по краям дырки: видно, куда целиться */
+    c.shadowBlur = shadows ? 14 * thin : 0;
+    c.shadowColor = '#fff';
+    c.strokeStyle = 'rgba(255,255,255,' + alpha.toFixed(3) + ')';
+    c.lineWidth = CONFIG.LOOP_WIDTH * 0.8 * thin;
+    c.beginPath(); c.arc(0, 0, r, a.gap + half, a.gap + half + 0.06); c.stroke();
+    c.beginPath(); c.arc(0, 0, r, a.gap - half - 0.06, a.gap - half); c.stroke();
+  }
+  /* сломанные: падают вниз, гаснут и по инерции ещё крутятся */
+  for(let i = 0; i < ring.broken.length; i++){
+    const d = ring.broken[i];
+    const p = Math.min(1, Math.max(0, (now - d.dead) / CONFIG.BREAK_MS));
+    const k = 1 - p;
+    const dim = k * k;                     // гаснет быстрее, чем падает
+    const half = d.arc / 2;
+    c.beginPath();
+    c.arc(0, d.dy, d.r, d.gap + half, d.gap - half + Math.PI * 2);
+    c.lineWidth = CONFIG.LOOP_WIDTH * thin * k + 0.4;
+    c.strokeStyle = 'rgba(255,255,255,' + (dim * 0.85).toFixed(3) + ')';
+    c.shadowBlur = shadows ? 16 * dim : 0;
+    c.shadowColor = '#fff';
+    c.stroke();
+  }
+  c.restore();
+}
+
+function drawBalls(c, now, shadows){
+  const r = ring.rBall;
+  for(let i = 0; i < ring.balls.length; i++){
+    const b = ring.balls[i];
+    const x = ring.cx + b.x, y = ring.cy + b.y;
+    let rr = r;
+    if(b.born && now - b.born < CONFIG.FLASH_MS){
+      const p = (now - b.born) / CONFIG.FLASH_MS;   // вспышка нового шарика
+      rr = r * (1 + (1 - p) * 1.6);
+    }
+    const col = arcColor(b.tint, 1);
+    c.beginPath();
+    c.arc(x, y, rr, 0, Math.PI * 2);
+    c.fillStyle = col;
+    if(shadows){ c.shadowBlur = 14; c.shadowColor = col; }
+    else { c.shadowBlur = 0; }
+    c.fill();
+  }
+}
+
+/* частицы из точки: разлёт разбитого круга и вспышка нового уровня */
+function burstAt(x, y, n, spMin, spAdd){
+  const now = performance.now();
+  for(let i = 0; i < n; i++){
+    const ang = (i / n) * Math.PI * 2 + rnd() * 0.4;
+    const sp = spMin + rnd() * spAdd;
+    ring.particles.push({
+      x: x, y: y,
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 60,
+      born: now, tint: rnd()
+    });
+  }
+}
+function burstParticles(){ burstAt(ring.cx, ring.cy, CONFIG.PARTICLES, 140, 220); }
+function drawParticles(c, now, dt){
+  if(!ring.particles.length) return;
+  const keep = [];
+  for(let i = 0; i < ring.particles.length; i++){
+    const p = ring.particles[i];
+    const age = now - p.born;
+    if(age > CONFIG.PARTICLE_MS) continue;
+    p.vy += 520 * dt;                       // гравитация
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    const k = 1 - age / CONFIG.PARTICLE_MS;
+    c.beginPath();
+    c.arc(p.x, p.y, 2.2 * k + 0.6, 0, Math.PI * 2);
+    c.fillStyle = arcColor(p.tint, k);
+    c.fill();
+    keep.push(p);
+  }
+  ring.particles = keep;
+}
+
+/* ==== 8. ВСПЛЫВАШКИ: пул из 12 узлов, никаких createElement в событиях ==== */
+const floats = { pool: [], i: 0 };
+for(let i = 0; i < CONFIG.FLOAT_POOL; i++){
+  const d = document.createElement('div');
+  d.className = 'float';
+  d.addEventListener('animationend', function(){ d.classList.remove('go'); });
+  el.fx.appendChild(d);
+  floats.pool.push(d);
+}
+function spawnFloat(x, y, text, color){
+  const d = floats.pool[floats.i];
+  floats.i = (floats.i + 1) % floats.pool.length;
+  d.classList.remove('go');
+  d.textContent = text;
+  d.style.color = color;
+  d.style.left = x + 'px';
+  d.style.top = y + 'px';
+  void d.offsetWidth;                       // перезапуск анимации
+  d.classList.add('go');
+}
+/* всплывашка над центром карточки */
+function floatOverCard(kind, text, color){
+  const r = el.cards[kind].getBoundingClientRect();
+  spawnFloat(r.left + r.width / 2, r.top - 6, text, color);
+}
+
+/* ==== 9. СОСТОЯНИЕ И ИНТЕРФЕЙС ==== */
+let state = createState();
+const ui = { lastDraw: 0, lastAch: 0, lastSave: 0, dirty: true, level: 1 };
+
+function setText(node, text){ if(node.textContent !== text) node.textContent = text; }
+
+function updateUI(){
+  const lvl = level(state);
+  const inc = incomePerSec(state);
+  setText(el.levelText, t('levelWord') + lvl);
+  el.progFill.style.width = progressPct(state) + '%';
+  setText(el.balance, formatNumber(Math.floor(state.money)));
+  setText(el.income, formatRate(inc) + t('perSec'));
+  /* цены и активность карточек */
+  const kinds = ['ball', 'speed', 'money'];
+  for(let i = 0; i < kinds.length; i++){
+    const k = kinds[i];
+    const cost = costOf(state, k);
+    setText(el.costs[k], formatNumber(cost));
+    const off = state.money < cost;
+    if(el.cards[k].classList.contains('off') !== off) el.cards[k].classList.toggle('off', off);
+  }
+  /* чип ядер и кнопка престижа */
+  if(state.cores > 0){
+    el.coreChip.classList.add('on');
+    setText(el.coreChip, t('coresWord') + state.cores + ' · ×' + coreMult(state).toFixed(2));
+  } else if(el.coreChip.classList.contains('on')){
+    el.coreChip.classList.remove('on');
+  }
+  const canP = canPrestige(state);
+  if(el.btnPrestige.classList.contains('on') !== canP) el.btnPrestige.classList.toggle('on', canP);
+}
+
+/* ==== 10. ПОКУПКА И СОБЫТИЯ УРОВНЯ ==== */
+function doBuy(kind, free){
+  const before = level(state);
+  const res = buy(state, kind, Math.random, free);
+  if(!res.ok){
+    shakeCard(kind);
+    sound.deny();
+    return false;
+  }
+  sound.click(res.crit);
+  if(res.crit) floatOverCard(kind, t('crit'), GOLD);
+  else floatOverCard(kind, '+' + gainPct(kind) + '%', BRANCH_COLOR[kind]);
+  if(kind === 'ball') syncBalls(true);       // новый шарик влетает в круг из центра
+  const after = level(state);
+  if(after > before) onLevelUp(after);
+  updateUI();
+  saveNow();                                 // площадка требует писать сразу после действия игрока
+  return true;
+}
+
+function shakeCard(kind){
+  const node = el.cards[kind];
+  node.classList.remove('shake');
+  void node.offsetWidth;
+  node.classList.add('shake');
+}
+['ball', 'speed', 'money'].forEach(function(k){
+  el.cards[k].addEventListener('animationend', function(){ el.cards[k].classList.remove('shake'); });
+});
+
+function onLevelUp(lvl){
+  el.levelBanner.textContent = t('levelBanner') + lvl;
+  el.levelBanner.classList.remove('go');
+  void el.levelBanner.offsetWidth;
+  el.levelBanner.classList.add('go');
+  burstParticles();
+  sound.level();
+  Platform.showInterstitial();               // реклама только здесь и не чаще раза в 3 минуты
+}
+el.levelBanner.addEventListener('animationend', function(){ el.levelBanner.classList.remove('go'); });
+
+/* ==== 11. ВВОД: указатель плюс клавиатура — игра проходится без мыши ==== */
+const rewardCool = { ball: 0, speed: 0, money: 0 };
+
+function pressOn(node){ node.classList.add('press'); }
+function pressOffAll(){
+  ['ball', 'speed', 'money'].forEach(function(k){ el.cards[k].classList.remove('press'); });
+}
+window.addEventListener('pointerup', pressOffAll);
+window.addEventListener('pointercancel', pressOffAll);
+
+/* один обработчик на оба вида ввода: pointerdown для мыши и пальца, keydown для Enter и пробела */
+function onActivate(node, fn){
+  node.addEventListener('pointerdown', function(e){ e.preventDefault(); fn(e); });
+  node.addEventListener('keydown', function(e){
+    if(e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    e.preventDefault();
+    fn(e);
+  });
+}
+
+function hitCards(e){
+  const badge = e.target.closest ? e.target.closest('.badge') : null;
+  if(badge){
+    watchAd(badge.getAttribute('data-badge'), badge);
+    return;
+  }
+  const card = e.target.closest ? e.target.closest('.card') : null;
+  if(!card) return;
+  sound.ensure();                            // первый жест игрока разблокирует звук
+  pressOn(card);
+  doBuy(card.getAttribute('data-kind'), false);
+}
+onActivate(el.cardsRow, hitCards);
+
+/* системное меню по правой кнопке и долгому тапу не должно вылезать нигде на экране */
+document.addEventListener('contextmenu', function(e){
+  if(e.target && e.target.closest && e.target.closest('#report')) return;   // отчёт тестов копируют
+  e.preventDefault();
+});
+
+/* бейджи «видео»: если рекламы нет — узлов нет вовсе */
+function initBadges(){
+  const on = Platform.hasRewarded();
+  ['ball', 'speed', 'money'].forEach(function(k){
+    const b = el.badges[k];
+    if(!b) return;
+    if(on){ b.classList.add('on'); b.setAttribute('aria-label', t('adAria')); }
+    else if(b.parentNode) b.parentNode.removeChild(b);
+  });
+  if(!on){ el.badges.ball = el.badges.speed = el.badges.money = null; }
+}
+
+/* просмотр видео выдаёт покупку этой ветки бесплатно, кулдаун 90 секунд */
+function watchAd(kind, badge){
+  const now = Date.now();
+  if(now < rewardCool[kind]) return;
+  Platform.showRewarded(function(){
+    rewardCool[kind] = Date.now() + CONFIG.REWARD_COOL_MS;
+    doBuy(kind, true);
+    updateBadgeCool();
+  }, updateBadgeCool);
+}
+function updateBadgeCool(){
+  const now = Date.now();
+  ['ball', 'speed', 'money'].forEach(function(k){
+    const b = el.badges[k];
+    if(b) b.classList.toggle('cool', now < rewardCool[k]);
+  });
+}
+/* ==== 12. ДОСТИЖЕНИЯ: проверка не чаще раза в секунду ==== */
+const achQueue = [];
+let achBusy = false;
+
+function checkAchievements(){
+  for(let i = 0; i < ACHIEVEMENTS.length; i++){
+    const a = ACHIEVEMENTS[i];
+    if(state.achieved.indexOf(a.id) >= 0) continue;
+    let got = false;
+    try { got = !!a.check(state); } catch(e){ got = false; }
+    if(got){
+      state.achieved.push(a.id);
+      achQueue.push(a.key);
+    }
+  }
+  if(achQueue.length && !achBusy) showNextAch();
+}
+
+function showNextAch(){
+  const key = achQueue.shift();
+  if(key === undefined){ achBusy = false; return; }
+  achBusy = true;
+  el.achToast.innerHTML = '';
+  const cap = document.createElement('span');
+  cap.textContent = t('achCapToast');
+  el.achToast.appendChild(cap);
+  el.achToast.appendChild(document.createTextNode(t(key)));
+  el.achToast.classList.add('on');
+  window.setTimeout(function(){
+    el.achToast.classList.remove('on');
+    window.setTimeout(showNextAch, 250);
+  }, CONFIG.ACH_SHOW_MS);
+}
+
+function showOffline(sum){
+  el.offlineToast.innerHTML = '';
+  el.offlineToast.appendChild(document.createTextNode(t('offline')));
+  const b = document.createElement('b');
+  b.textContent = '+' + formatNumber(Math.floor(sum));
+  el.offlineToast.appendChild(b);
+  el.offlineToast.classList.add('on');
+  window.setTimeout(function(){ el.offlineToast.classList.remove('on'); }, CONFIG.OFFLINE_SHOW_MS);
+}
+
+/* ==== 13. ПАНЕЛЬ НАСТРОЕК ==== */
+const STAT_ROWS = [
+  { key: 'statTime',      get: function(s){ return fmtTime(s.stats.playtimeMs); } },
+  { key: 'statBuys',      get: function(s){ return formatNumber(s.stats.clicks); } },
+  { key: 'statCrits',     get: function(s){ return formatNumber(s.stats.crits); } },
+  { key: 'statPrestiges', get: function(s){ return formatNumber(s.stats.prestiges); } },
+  { key: 'statBalls',     get: function(s){ return formatNumber(s.stats.allTimeBalls); } },
+  { key: 'statRings',     get: function(s){ return formatNumber(s.stats.ringsBroken); } },
+  { key: 'statEarned',    get: function(s){ return formatNumber(Math.floor(s.stats.allTimeMoney)); } }
+];
+
+function fmtTime(ms){
+  const t0 = Math.floor(ms / 1000);
+  const h = Math.floor(t0 / 3600), m = Math.floor((t0 % 3600) / 60), s = t0 % 60;
+  return (h ? h + t('unitH') : '') + (h || m ? m + t('unitM') : '') + s + t('unitS');
+}
+/* разметка списков собирается один раз, дальше только правим значения */
+const achNodes = {}, statNodes = [], statKeyNodes = [];
+(function buildPanel(){
+  ACHIEVEMENTS.forEach(function(a){
+    const row = document.createElement('div');
+    row.className = 'ach';
+    const mark = document.createElement('em');
+    mark.textContent = '✓';
+    row.appendChild(mark);
+    const label = document.createElement('span');
+    row.appendChild(label);
+    el.achList.appendChild(row);
+    achNodes[a.id] = { row: row, label: label };
+  });
+  STAT_ROWS.forEach(function(r){
+    const row = document.createElement('div');
+    row.className = 'row';
+    const k = document.createElement('span'); k.className = 'k';
+    const v = document.createElement('span'); v.className = 'v'; v.textContent = '0';
+    row.appendChild(k); row.appendChild(v);
+    el.statList.appendChild(row);
+    statNodes.push(v);
+    statKeyNodes.push(k);
+  });
+})();
+
+function refreshPanel(){
+  ACHIEVEMENTS.forEach(function(a){
+    achNodes[a.id].row.classList.toggle('got', state.achieved.indexOf(a.id) >= 0);
+    setText(achNodes[a.id].label, t(a.key));
+  });
+  STAT_ROWS.forEach(function(r, i){
+    setText(statKeyNodes[i], t(r.key));
+    statNodes[i].textContent = r.get(state);
+  });
+  el.swSound.classList.toggle('on', state.settings.sound);
+  showVolume();
+  setText(el.saveState, storage.ok ? t('saveOn') : t('saveOff'));
+  el.saveState.style.color = storage.ok ? '' : GOLD;
+}
+
+/* ползунок и подпись всегда показывают то, что лежит в настройках */
+function showVolume(){
+  const v = state.settings.volume;
+  if(el.rngVol) el.rngVol.value = String(v);
+  setText(el.volValue, v + '%');
+  if(el.volWrap) el.volWrap.classList.toggle('off', soundGain(state) <= 0);
+}
+/* короткий щелчок на пробу, но не на каждое движение ползунка */
+let volTickAt = 0;
+function volPreview(){
+  const t = performance.now();
+  if(t - volTickAt < 150) return;
+  volTickAt = t;
+  sound.pay();
+}
+
+function openSettings(){
+  refreshPanel();
+  el.mSettings.classList.add('on');
+  Platform.gameplayStop();
+}
+function closeSettings(){
+  el.mSettings.classList.remove('on');
+  Platform.gameplayStart();
+}
+onActivate(el.btnSettings, openSettings);
+onActivate(el.btnCloseSettings, closeSettings);
+el.mSettings.addEventListener('pointerdown', function(e){ if(e.target === el.mSettings) closeSettings(); });
+
+onActivate(el.swSound, function(){
+  state.settings.sound = !state.settings.sound;
+  /* включили звук, а ползунок в нуле — поднимаем его, иначе кнопка была бы обманом */
+  if(state.settings.sound && state.settings.volume <= 0) state.settings.volume = CONFIG.VOL_DEFAULT;
+  el.swSound.classList.toggle('on', state.settings.sound);
+  if(state.settings.sound){ sound.ensure(); sound.setVolume(); sound.click(false); }
+  else { sound.mute(true); }
+  showVolume();
+  saveNow();
+});
+
+/* громкость 0..100. Ноль — это и есть «звука нет», поэтому тумблер идёт за ползунком */
+el.rngVol.addEventListener('input', function(){
+  const v = Math.max(0, Math.min(100, Math.round(Number(el.rngVol.value) || 0)));
+  state.settings.volume = v;
+  state.settings.sound = v > 0;
+  el.swSound.classList.toggle('on', state.settings.sound);
+  sound.ensure();
+  sound.setVolume();
+  showVolume();
+  if(v > 0) volPreview();
+});
+/* пишем на диск в конце движения, а не на каждый пиксель */
+el.rngVol.addEventListener('change', saveNow);
+/* ==== 14. СВОЁ ПОДТВЕРЖДЕНИЕ вместо confirm() ==== */
+let confirmCb = null;
+function askConfirm(text, yes, cb){
+  el.confirmText.textContent = text;
+  el.btnYes.textContent = yes;
+  confirmCb = cb;
+  el.mConfirm.classList.add('on');
+}
+function closeConfirm(){ el.mConfirm.classList.remove('on'); confirmCb = null; }
+onActivate(el.btnNo, closeConfirm);
+onActivate(el.btnYes, function(){
+  const cb = confirmCb;
+  closeConfirm();
+  if(cb) cb();
+});
+
+/* ==== 15. ПРЕСТИЖ И СБРОС ==== */
+onActivate(el.btnPrestige, function(){
+  if(!canPrestige(state)) return;
+  askConfirm(t('prestigeAsk', { mult: CONFIG.CORE_MULT, balls: CONFIG.CORE_FREE_BALLS }),
+             t('prestigeYes'), function(){
+    if(!prestige(state)) return;
+    ring.balls.length = 0;
+    syncBalls(true);
+    sound.level();
+    updateUI();
+    saveNow();
+  });
+});
+
+onActivate(el.btnReset, function(){
+  askConfirm(t('resetAsk1'), t('resetYes1'), function(){
+    askConfirm(t('resetAsk2'), t('resetYes2'), function(){
+      storage.del(CONFIG.SAVE_KEY);
+      state = createState();
+      state.lastTick = Date.now();
+      ring.balls.length = 0;
+      ring.particles.length = 0;
+      initRings();
+      syncBalls(false);
+      achQueue.length = 0;
+      updateUI();
+      refreshPanel();
+      saveNow();
+    });
+  });
+});
+
+/* ==== 16. СОХРАНЕНИЕ ==== */
+function saveNow(){
+  state.lastTick = Date.now();
+  storage.set(CONFIG.SAVE_KEY, serialize(state));
+  Platform.save(state);
+  ui.lastSave = performance.now();
+}
+/* офлайн-доход: считаем по прошедшему времени, с потолком и по половинной ставке */
+function applyOffline(){
+  if(!state.lastTick) { state.lastTick = Date.now(); return; }
+  const elapsed = Date.now() - state.lastTick;
+  state.lastTick = Date.now();
+  if(elapsed < 1000) return;
+  const sum = offlineGain(state, elapsed);
+  if(sum <= 0) return;
+  state.money += sum;
+  state.stats.allTimeMoney += sum;
+  showOffline(sum);
+}
+
+/* ==== 17. ЦИКЛ. Единственный источник времени — requestAnimationFrame ==== */
+/* Причин для паузы две: свёрнутая вкладка и реклама. Держим их по отдельности,
+   иначе закрытие рекламы снимало бы паузу у спрятанной вкладки. */
+const Game = {
+  paused: false,
+  why: { hidden: false, ad: false },
+  setPause: function(why, on){
+    this.why[why] = !!on;
+    const p = this.why.hidden || this.why.ad;
+    if(p === this.paused) return;
+    this.paused = p;
+    sound.mute(p);
+    if(p){ Platform.gameplayStop(); }
+    else { Platform.gameplayStart(); lastFrame = 0; }
+  },
+  adPause: function(on){ this.setPause('ad', on); }
+};
+let lastFrame = 0;
+
+function frame(now){
+  window.requestAnimationFrame(frame);
+  if(!lastFrame){ lastFrame = now; return; }
+  let dt = (now - lastFrame) / 1000;
+  lastFrame = now;
+  if(!(dt > 0)) dt = 0;
+  if(dt > CONFIG.DT_CAP) dt = CONFIG.DT_CAP;   // всё, что больше, отдаёт офлайн-возврат
+  if(!Game.paused){
+    accrue(state, dt);                         // деньги капают в копилку, а не в баланс
+    state.stats.playtimeMs += dt * 1000;
+  }
+  drawRing(now, dt, Game.paused);              // на паузе кадр стоит: ни физики, ни выплат
+  if(now - ui.lastDraw >= CONFIG.UI_EVERY_MS){ ui.lastDraw = now; updateUI(); updateBadgeCool(); }
+  if(now - ui.lastAch >= CONFIG.ACH_CHECK_MS){ ui.lastAch = now; checkAchievements(); }
+  /* на паузе не сохраняем: иначе сдвинулась бы точка отсчёта офлайн-дохода */
+  if(!Game.paused && now - ui.lastSave >= CONFIG.SAVE_EVERY_MS){ saveNow(); }
+}
+
+/* ушли с вкладки — игра встаёт на паузу и запоминается; вернулись — досчитываем
+   пропущенное время по офлайн-правилу и продолжаем с того же места */
+document.addEventListener('visibilitychange', function(){
+  if(document.hidden){
+    saveNow();
+    Game.setPause('hidden', true);
+  } else {
+    applyOffline();
+    Game.setPause('hidden', false);
+    lastFrame = 0;
+  }
+});
+window.addEventListener('pagehide', saveNow);   // не beforeunload: на мобильных он не срабатывает
+window.addEventListener('resize', ringResize);
+/* ==== 18. СТАРТ ==== */
+/* один проход по разметке: язык уже известен, подписи и подсказки встают на место */
+function applyI18n(){
+  document.documentElement.lang = LANG;
+  document.title = t('title');
+  const nodes = document.querySelectorAll('[data-i18n],[data-i18n-html],[data-i18n-title],[data-i18n-aria]');
+  for(let i = 0; i < nodes.length; i++){
+    const n = nodes[i];
+    const k = n.getAttribute('data-i18n');
+    if(k) n.textContent = t(k);
+    const h = n.getAttribute('data-i18n-html');
+    if(h) n.innerHTML = t(h);
+    const ti = n.getAttribute('data-i18n-title');
+    if(ti) n.setAttribute('title', t(ti));
+    const ar = n.getAttribute('data-i18n-aria');
+    if(ar) n.setAttribute('aria-label', t(ar));
+  }
+  el.btnYes.textContent = t('yes');
+}
+
+function start(cloud){
+  state = cloud ? migrate(cloud) : deserialize(storage.get(CONFIG.SAVE_KEY));
+  applyOffline();
+  applyI18n();
+  ringResize();
+  syncBalls(false);
+  initBadges();
+  updateUI();
+  refreshPanel();
+  window.requestAnimationFrame(frame);
+  Platform.loadingReady();                      // ровно один раз, интерфейс уже отрисован
+  Platform.gameplayStart();
+  runModes();
+}
+
+Platform.init().then(function(ok){
+  LANG = pickLang(Platform.lang());
+  if(ok){ Platform.load().then(start, function(){ start(null); }); }
+  else start(null);
+}, function(){ LANG = pickLang(Platform.lang()); start(null); });
+
+/* ==== 19. ВСТРОЕННЫЕ ПРОВЕРКИ: ?test=1 — формулы, ?sim=1 — прогон бота ==== */
+function reportShow(lines){
+  el.report.innerHTML = lines.join('\n');
+  el.report.classList.add('on');
+  el.report.addEventListener('pointerdown', function(e){
+    if(e.target === el.report) el.report.classList.remove('on');
+  });
+}
+function esc(v){ return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+function runTests(){
+  const out = [];
+  let pass = 0, total = 0;
+  function check(name, got, want){
+    total++;
+    const ok = String(got) === String(want);
+    if(ok){ pass++; out.push('<span class="ok">ок  </span>' + esc(name)); }
+    else out.push('<span class="bad">ПРОВАЛ</span> ' + esc(name) + '\n      ждали: ' + esc(want) + '\n      вышло: ' + esc(got));
+  }
+  const s0 = createState();
+  /* 1. цена шарика */
+  check('costBall при 0 шариках = 262', costBall({ balls: 0 }), 262);
+  check('costBall при 1 шарике = 309', costBall({ balls: 1 }), 309);
+  check('costBall при 2 шариках = 364', costBall({ balls: 2 }), 364);
+  /* 2. цены дешёвых ветвей */
+  check('costMoney при 0 = 104', costMoney({ moneyLvl: 0 }), 104);
+  check('costMoney при 1 = 126', costMoney({ moneyLvl: 1 }), 126);
+  check('costSpeed при 0 = 209', costSpeed({ speedLvl: 0 }), 209);
+  check('costSpeed при 1 = 254', costSpeed({ speedLvl: 1 }), 254);
+  /* 3. уровень */
+  check('level при 0 шариках', level({ balls: 0 }), 1);
+  check('level при 4 шариках', level({ balls: 4 }), 1);
+  check('level при 5 шариках', level({ balls: 5 }), 2);
+  check('level при 49 шариках', level({ balls: 49 }), 10);
+  /* 4. полоса прогресса */
+  check('прогресс при 7 шариках = 40%', progressPct({ balls: 7 }), 40);
+  /* 5. доход строго растёт после любой покупки любой ветки */
+  ['ball', 'speed', 'money'].forEach(function(k){
+    const s = createState();
+    s.money = 1e9;
+    const before = incomePerSec(s);
+    buy(s, k, function(){ return 1; });
+    check('доход вырос после покупки «' + k + '»', incomePerSec(s) > before, true);
+  });
+  /* 6. формат чисел */
+  check('formatNumber 999', formatNumber(999), '999');
+  check('formatNumber 1000', formatNumber(1000), '1K');
+  check('formatNumber 1250', formatNumber(1250), '1.25K');
+  check('formatNumber 1e6', formatNumber(1e6), '1M');
+  check('formatNumber 1.234e9', formatNumber(1.234e9), '1.23B');
+  check('formatNumber 1e12', formatNumber(1e12), '1T');
+  check('formatNumber 1e15', formatNumber(1e15), '1aa');
+  check('formatNumber 1e300 не Infinity', /Infinity|NaN/.test(formatNumber(1e300)), false);
+  check('formatNumber 1e300 непустая строка', formatNumber(1e300).length > 1, true);
+  /* 7. офлайн: 10 часов при доходе 100/с режется потолком 2 часа и половинной ставкой */
+  check('офлайн 10 ч при 100/с', offlineRaw(100, 10 * 3600 * 1000), 360000);
+  /* 8. сохранение и загрузка */
+  const sA = createState();
+  sA.money = 12345.678; sA.balls = 7; sA.speedLvl = 3; sA.moneyLvl = 4; sA.cores = 2; sA.bank = 9.5;
+  sA.lastTick = 1700000000000; sA.stats.clicks = 42; sA.achieved = ['ball1'];
+  check('save → load даёт равное состояние', serialize(deserialize(serialize(sA))), serialize(sA));
+  check('битый JSON даёт дефолт', serialize(deserialize('{не json')), serialize(createState()));
+  check('пустая запись даёт дефолт', serialize(deserialize(null)), serialize(createState()));
+  const savedOk = storage.ok, savedBackend = storage.backend;
+  storage.backend = { getItem: function(){ throw new Error('нет хранилища'); },
+                      setItem: function(){ throw new Error('нет хранилища'); },
+                      removeItem: function(){ throw new Error('нет хранилища'); } };
+  let survived = true, loaded = null;
+  try {
+    loaded = deserialize(storage.get(CONFIG.SAVE_KEY));
+    storage.set(CONFIG.SAVE_KEY, 'x');
+  } catch(e){ survived = false; }
+  const flagged = storage.ok === false;
+  storage.backend = savedBackend; storage.ok = savedOk;
+  check('недоступное хранилище не ломает игру', survived, true);
+  check('без хранилища получаем дефолтное состояние', serialize(loaded), serialize(createState()));
+  check('недоступность хранилища замечена', flagged, true);
+  /* 9. покупка без денег не меняет состояние */
+  const sB = createState();
+  sB.money = 10;
+  const snapshot = serialize(sB);
+  const res = buy(sB, 'ball', function(){ return 0; });
+  check('покупка без денег не удалась', res.ok, false);
+  check('покупка без денег не тронула состояние', serialize(sB), snapshot);
+  /* 10. престиж ниже десятого уровня не выполняется */
+  const sC = createState();
+  sC.balls = CONFIG.BALLS_PER_LEVEL * (CONFIG.PRESTIGE_AT_LEVEL - 1) - 1;
+  const snapC = serialize(sC);
+  check('престиж на 9 уровне запрещён', prestige(sC), false);
+  check('престиж на 9 уровне не тронул состояние', serialize(sC), snapC);
+  sC.balls = CONFIG.BALLS_PER_LEVEL * (CONFIG.PRESTIGE_AT_LEVEL - 1);
+  check('престиж на 10 уровне разрешён', prestige(sC), true);
+  check('после престижа ядро одно', sC.cores, 1);
+  check('после престижа деньги стартовые', sC.money, CONFIG.START_MONEY);
+  check('после престижа бесплатные шарики', sC.balls, CONFIG.CORE_FREE_BALLS);
+  /* 11. копилка: деньги приходят на вылете шарика, но средняя ставка та же */
+  const sD = createState();
+  const incD = incomePerSec(sD);
+  accrue(sD, 1);
+  check('копилка за секунду = доход в секунду', Math.abs(sD.bank - incD) < 1e-9, true);
+  check('копилка не трогает баланс', sD.money, CONFIG.START_MONEY);
+  const paid = cashOut(sD);
+  check('выплата равна копилке', Math.abs(paid - incD) < 1e-9, true);
+  check('после выплаты копилка пуста', sD.bank, 0);
+  check('выплата легла в баланс', Math.abs(sD.money - (CONFIG.START_MONEY + incD)) < 1e-9, true);
+  check('выплата попала в статистику', Math.abs(sD.stats.allTimeMoney - incD) < 1e-9, true);
+  check('выплата пустой копилки = 0', cashOut(sD), 0);
+  const sE = createState();
+  for(let i = 0; i < 600; i++) accrue(sE, 10 / 600);   // 10 секунд мелкими кадрами
+  cashOut(sE);
+  const wantE = CONFIG.START_MONEY + incomePerSec(sE) * 10;
+  check('десять секунд кадрами = ровно десять секунд дохода', Math.abs(sE.money - wantE) < 1e-6, true);
+  const sF = createState();
+  sF.balls = CONFIG.BALLS_PER_LEVEL * (CONFIG.PRESTIGE_AT_LEVEL - 1);
+  accrue(sF, 5);
+  prestige(sF);
+  check('престиж обнуляет копилку', sF.bank, 0);
+  const sG = createState();
+  sG.stats.ringsBroken = 17;
+  check('стартовое состояние: денег 71', s0.money, 71);
+  check('стартовое состояние: копилка пуста', s0.bank, 0);
+  check('стартовое состояние: кругов сломано 0', s0.stats.ringsBroken, 0);
+  check('счётчик кругов переживает сохранение', deserialize(serialize(sG)).stats.ringsBroken, 17);
+  /* 12. звук: тумблер и громкость 0..100 */
+  const sH = createState();
+  check('стартовая громкость 60%', sH.settings.volume, CONFIG.VOL_DEFAULT);
+  check('звук выключен — множитель 0', soundGain(sH), 0);
+  sH.settings.sound = true;
+  check('звук включён — множитель 0.6', soundGain(sH), 0.6);
+  sH.settings.volume = 0;
+  check('ползунок в нуле — тишина', soundGain(sH), 0);
+  sH.settings.volume = 100;
+  check('ползунок на сотне — множитель 1', soundGain(sH), 1);
+  sH.settings.volume = 37;
+  check('громкость переживает сохранение', deserialize(serialize(sH)).settings.volume, 37);
+  check('громкость сверх сотни срезается', deserialize('{"settings":{"volume":999}}').settings.volume, 100);
+  check('громкость ниже нуля срезается', deserialize('{"settings":{"volume":-5}}').settings.volume, 0);
+  check('громкость строкой даёт стартовую', deserialize('{"settings":{"volume":"громко"}}').settings.volume, CONFIG.VOL_DEFAULT);
+  out.push('');
+  out.push((pass === total ? '<span class="ok">' : '<span class="bad">') + 'тесты: ' + pass + '/' + total + '</span>');
+  return out;
+}
+function fmtSec(v){
+  if(v === undefined || v === null) return '—';
+  const m = Math.floor(v / 60), s = Math.round(v % 60);
+  return (m ? m + ' мин ' : '') + s + ' с';
+}
+
+/* ускоренный прогон бота на 12 игровых часов и сверка с эталоном (допуск ±25%) */
+function runSim(){
+  const out = [];
+  const TOL = 0.25;
+  const r = simulate(12);
+  const r1 = simulate(12, { cores: 1 });
+  const r3 = simulate(12, { cores: 3 });
+  let pass = 0, total = 0;
+  function row(name, got, want, fmt){
+    total++;
+    const ok = got !== undefined && Math.abs(got - want) / want <= TOL;
+    if(ok) pass++;
+    const f = fmt || fmtSec;
+    out.push((ok ? '<span class="ok">в допуске</span>' : '<span class="bad">мимо    </span>')
+      + '  ' + esc(name) + ': ' + esc(f(got)) + '   (эталон ' + esc(f(want)) + ')');
+  }
+  function plain(v){ return v === undefined ? '—' : String(Math.round(v)); }
+  out.push('<span class="hl">ПРОГОН БОТА «максимум прироста дохода на рубль», 12 игровых часов</span>');
+  out.push('');
+  row('уровень 2 (5 шариков)', r.levelAt[2], 120);
+  row('уровень 3', r.levelAt[3], 270);
+  row('уровень 5', r.levelAt[5], 600);
+  row('уровень 10 (открывается престиж)', r.levelAt[10], 1860);
+  row('уровень 15', r.levelAt[15], 4020);
+  row('медиана паузы между покупками', r.median, 57);
+  row('самая долгая пауза за 12 часов', r.worst, 420);
+  row('шариков за 12 часов', r.balls, 167, plain);
+  row('покупок за 12 часов', r.purchases, 450, plain);
+  out.push('');
+  out.push('<span class="hl">с престижем</span>');
+  row('уровень 10 при 1 ядре', r1.levelAt[10], 1440);
+  row('уровень 10 при 3 ядрах', r3.levelAt[10], 780);
+  out.push('');
+  out.push('итог забега: уровень ' + r.level + ', «скорость» ' + r.speedLvl
+    + ', «деньги» ' + r.moneyLvl + ', доход ' + formatNumber(r.income) + '/с');
+  out.push((pass === total ? '<span class="ok">' : '<span class="bad">')
+    + 'показателей в допуске: ' + pass + '/' + total + '</span>');
+  return out;
+}
+
+function runModes(){
+  const q = window.location.search;
+  if(/[?&]test=1/.test(q)) reportShow(runTests());
+  else if(/[?&]sim=1/.test(q)) reportShow(runSim());
+}
+
+</script>
+</body>
+</html>
