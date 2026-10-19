@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ЯМА — они лезут снизу</title>
+<style>
+@font-face{font-family:'Montserrat';font-style:normal;font-weight:400 900;font-display:block;src:url(fonts/montserrat-cyrillic.woff2) format('woff2');unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:'Montserrat';font-style:normal;font-weight:400 900;font-display:block;src:url(fonts/montserrat-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+:root{
+  --red:#b3141a; --red2:#ff3a2e; --ink:#ebe5dc; --dim:rgba(235,229,220,.56); --faint:rgba(235,229,220,.28);
+  --panel:rgba(9,10,13,.86); --line:rgba(255,255,255,.09); --acid:#9dff4f; --gold:#ffc94d; --hp:#d8312a; --armor:#4aa3ff; --stam:#e8e2d0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;color:var(--ink);
+  font-family:'Montserrat','Segoe UI',system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+#game{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:default}
+.hidden{display:none!important}
+button{font-family:inherit}
+
+/* ---------------- HUD ---------------- */
+#hud{position:fixed;inset:0;pointer-events:none;z-index:2}
+#vignette{position:absolute;inset:0;opacity:0;transition:opacity .08s;
+  background:radial-gradient(ellipse at center,transparent 38%,rgba(120,0,0,.55) 75%,rgba(70,0,0,.9) 100%)}
+#lowhp{position:absolute;inset:0;opacity:0;background:radial-gradient(ellipse at center,transparent 45%,rgba(90,0,0,.6) 100%);animation:pulse 1s infinite}
+#acidFx{position:absolute;inset:0;opacity:0;transition:opacity .3s;
+  background:radial-gradient(circle at 30% 40%,rgba(120,255,40,.35),transparent 30%),radial-gradient(circle at 70% 65%,rgba(120,255,40,.3),transparent 28%),radial-gradient(ellipse at center,transparent 50%,rgba(40,90,0,.55) 100%)}
+@keyframes pulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.6)}}
+
+#crosshair{position:absolute;left:50%;top:50%;width:0;height:0;transition:opacity .12s}
+#crosshair i{position:absolute;background:rgba(255,255,255,.92);box-shadow:0 0 2px rgba(0,0,0,.9)}
+#crosshair .t,#crosshair .b{width:2px;height:9px;left:-1px}
+#crosshair .l,#crosshair .r{width:9px;height:2px;top:-1px}
+#crosshair .dot{width:2px;height:2px;left:-1px;top:-1px;border-radius:1px}
+#hitmarker{position:absolute;left:50%;top:50%;width:0;height:0;opacity:0}
+#hitmarker i{position:absolute;width:12px;height:2px;background:#fff;left:-6px;top:-1px;box-shadow:0 0 3px rgba(0,0,0,.8)}
+#hitmarker i:nth-child(1){transform:rotate(45deg) translateX(-12px)}
+#hitmarker i:nth-child(2){transform:rotate(45deg) translateX(12px)}
+#hitmarker i:nth-child(3){transform:rotate(-45deg) translateX(-12px)}
+#hitmarker i:nth-child(4){transform:rotate(-45deg) translateX(12px)}
+#hitmarker.kill i{background:var(--red2);width:15px}
+#dmgDirs{position:absolute;left:50%;top:50%;width:0;height:0}
+.dmgdir{position:absolute;left:-90px;top:-90px;width:180px;height:180px;border-radius:50%;
+  border:6px solid transparent;border-top-color:rgba(255,40,30,.85);filter:blur(1px);transition:opacity .6s}
+
+.hud-box{position:absolute;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+#waveBox{left:28px;top:22px}
+#waveNum{font-weight:900;font-size:30px;letter-spacing:.08em}
+#waveNum b{color:var(--red2)}
+#waveLeft{font-size:13px;font-weight:600;color:var(--dim);letter-spacing:.12em;text-transform:uppercase;margin-top:2px}
+#scoreBox{right:28px;top:20px;text-align:right}
+#score{font-weight:900;font-size:30px;letter-spacing:.04em}
+#money{font-weight:800;font-size:18px;color:var(--gold);margin-top:2px}
+#feed{position:absolute;right:28px;top:96px;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.feed-item{font-size:13px;font-weight:700;letter-spacing:.06em;padding:4px 10px;background:rgba(0,0,0,.45);border-right:3px solid var(--red);
+  animation:feedIn .25s ease-out;transition:opacity .5s}
+.feed-item .hs{color:var(--gold)}
+.feed-item .pts{color:var(--dim);margin-left:8px}
+@keyframes feedIn{from{transform:translateX(30px);opacity:0}}
+
+#bossBar{position:absolute;left:50%;top:26px;transform:translateX(-50%);width:min(560px,50vw);text-align:center}
+#bossBar .name{font-weight:900;letter-spacing:.35em;font-size:15px;color:#ffb3a8;margin-bottom:6px}
+#bossBar .bar{height:10px;background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.18)}
+#bossBar .bar i{display:block;height:100%;width:100%;background:linear-gradient(90deg,#6d0a0d,#e0251c);transition:width .15s}
+
+#vitals{left:28px;bottom:26px;width:270px}
+.vrow{display:flex;align-items:center;gap:10px;margin-top:8px}
+.vrow svg{width:22px;height:22px;flex:none;filter:drop-shadow(0 1px 2px #000)}
+.vbar{position:relative;flex:1;height:12px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.14);overflow:hidden}
+.vbar i{position:absolute;left:0;top:0;bottom:0;transition:width .12s}
+.vbar .lag{background:rgba(255,255,255,.35);transition:width .6s .25s}
+#hpBar i.val{background:linear-gradient(90deg,#7c0d0b,var(--hp))}
+#arBar i.val{background:linear-gradient(90deg,#163e6b,var(--armor))}
+.vnum{width:38px;text-align:right;font-weight:800;font-size:16px}
+#stamBar{height:3px;margin:8px 0 0 32px;background:rgba(255,255,255,.12);width:calc(100% - 32px)}
+#stamBar i{display:block;height:100%;background:var(--stam);transition:width .1s}
+#radarWrap{left:28px;bottom:130px;width:150px;height:150px;border-radius:50%;overflow:hidden;
+  background:radial-gradient(circle,rgba(20,30,25,.55),rgba(0,0,0,.65));border:1px solid rgba(255,255,255,.14)}
+#radar{width:100%;height:100%}
+
+#ammoBox{right:30px;bottom:26px;text-align:right}
+#ammoMain{font-weight:900;font-size:54px;line-height:1;letter-spacing:.02em}
+#ammoMain small{font-size:22px;color:var(--dim);font-weight:700;margin-left:6px}
+#ammoMain.low{color:var(--red2)}
+#weapName{font-weight:800;font-size:14px;letter-spacing:.24em;text-transform:uppercase;color:var(--dim);margin-top:4px}
+#slots{display:flex;gap:6px;justify-content:flex-end;margin-top:10px}
+.slot{font-size:11px;font-weight:800;padding:4px 8px;border:1px solid rgba(255,255,255,.18);color:var(--faint);background:rgba(0,0,0,.35)}
+.slot.owned{color:var(--dim)}
+.slot.active{color:#fff;border-color:var(--red2);background:rgba(179,20,26,.35)}
+#grenades{margin-top:8px;font-weight:800;font-size:15px;color:var(--dim)}
+#grenades svg{width:16px;height:16px;vertical-align:-3px;margin-left:4px}
+
+#center{position:absolute;left:50%;top:26%;transform:translateX(-50%);text-align:center;width:90vw}
+#banner{opacity:0;transition:opacity .4s}
+#banner .t1{font-weight:900;font-size:64px;letter-spacing:.18em;color:#f1e7dc;text-shadow:0 0 30px rgba(200,20,20,.55),0 3px 6px #000}
+#banner .t2{font-weight:700;font-size:16px;letter-spacing:.32em;color:var(--dim);margin-top:6px;text-transform:uppercase}
+#msg{margin-top:18px;font-weight:800;font-size:16px;letter-spacing:.2em;color:#fff;opacity:0;transition:opacity .2s;text-transform:uppercase}
+#combo{position:absolute;left:50%;top:calc(50% + 46px);transform:translateX(-50%);font-weight:900;font-size:20px;color:var(--gold);opacity:0;transition:opacity .3s;letter-spacing:.1em}
+#hint{position:absolute;left:50%;bottom:22%;transform:translateX(-50%);font-weight:700;font-size:15px;letter-spacing:.14em;
+  padding:8px 16px;background:rgba(0,0,0,.5);border:1px solid var(--line);opacity:0;transition:opacity .2s}
+#hint b{color:var(--gold)}
+#breakTimer{position:absolute;left:50%;top:84px;transform:translateX(-50%);font-weight:800;font-size:15px;letter-spacing:.2em;color:var(--dim);text-align:center;text-transform:uppercase}
+#breakTimer b{color:#fff;font-size:22px}
+#fps{position:absolute;right:8px;bottom:4px;font:600 11px monospace;color:rgba(255,255,255,.4)}
+
+/* ---------------- экраны ---------------- */
+.screen{position:fixed;inset:0;z-index:5;display:flex}
+.btn{display:block;width:100%;text-align:left;background:none;border:none;color:var(--ink);font-weight:800;font-size:21px;letter-spacing:.2em;
+  text-transform:uppercase;padding:12px 18px 12px 22px;cursor:pointer;position:relative;transition:color .15s,padding .15s,background .15s}
+.btn::before{content:'';position:absolute;left:0;top:50%;width:4px;height:0;background:var(--red2);transform:translateY(-50%);transition:height .15s}
+.btn:hover{padding-left:30px;background:linear-gradient(90deg,rgba(179,20,26,.28),transparent)}
+.btn:hover::before{height:70%}
+.btn.small{font-size:15px;padding:10px 16px}
+.btn:disabled{color:var(--faint);cursor:default}
+.title{font-weight:900;letter-spacing:.14em;line-height:.9;
+  background:linear-gradient(180deg,#f3ebe2 0%,#d9c9bb 45%,#8c1013 70%,#3b0507 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 28px rgba(160,10,10,.45)) drop-shadow(0 4px 2px rgba(0,0,0,.8))}
+.panel{background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(6px)}
+.sub{color:var(--dim);font-weight:600;letter-spacing:.3em;text-transform:uppercase;font-size:13px}
+
+#screen-loading{background:#050506;align-items:center;justify-content:center;flex-direction:column}
+#screen-loading .title{font-size:120px}
+#loadBar{width:340px;height:3px;background:rgba(255,255,255,.1);margin-top:34px}
+#loadBar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#6d0a0d,#ff3a2e);transition:width .2s}
+#loadText{margin-top:14px;font-size:12px;letter-spacing:.25em;color:var(--faint);text-transform:uppercase}
+
+#screen-menu{background:linear-gradient(90deg,rgba(0,0,0,.88) 0%,rgba(0,0,0,.6) 34%,rgba(0,0,0,0) 62%);align-items:center}
+.menu-col{margin-left:7vw;width:420px}
+#screen-menu .title{font-size:150px;animation:flicker 7s infinite}
+@keyframes flicker{0%,93%,100%{opacity:1}94%{opacity:.55}95%{opacity:1}97%{opacity:.7}98%{opacity:1}}
+.menu-col .sub{margin:14px 0 46px 6px}
+.menu-foot{margin-top:40px;margin-left:22px;font-size:12px;letter-spacing:.14em;color:var(--faint);line-height:1.8}
+.menu-foot b{color:var(--dim)}
+
+.dialog{margin:auto;width:min(760px,92vw);padding:34px 40px}
+.dialog h2{font-weight:900;font-size:36px;letter-spacing:.2em;margin-bottom:22px}
+.keys{display:grid;grid-template-columns:150px 1fr;gap:10px 18px;font-size:14px;font-weight:600;color:var(--dim)}
+.keys kbd{font:800 12px 'Montserrat',sans-serif;color:#fff;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-bottom-width:3px;padding:3px 8px;margin-right:4px;display:inline-block}
+.tips{margin-top:22px;font-size:13px;color:var(--faint);line-height:1.7;letter-spacing:.04em}
+.row{display:flex;align-items:center;gap:16px;margin:14px 0;font-weight:700;font-size:14px;letter-spacing:.1em;text-transform:uppercase}
+.row label{width:230px;color:var(--dim)}
+.row input[type=range]{flex:1;accent-color:#d0201a}
+.row .val{width:56px;text-align:right;color:#fff}
+.seg{display:flex;gap:6px}
+.seg button{background:rgba(255,255,255,.06);color:var(--dim);border:1px solid rgba(255,255,255,.14);padding:7px 12px;font-weight:800;letter-spacing:.12em;cursor:pointer;font-size:12px;text-transform:uppercase}
+.seg button.on{color:#fff;border-color:var(--red2);background:rgba(179,20,26,.35)}
+.dialog .actions{display:flex;gap:10px;margin-top:26px}
+.dialog .actions .btn{width:auto;border:1px solid var(--line)}
+
+#screen-pause,#screen-over,#screen-shop,#screen-controls,#screen-settings{background:rgba(0,0,0,.62)}
+#screen-pause .menu-col .title{font-size:84px}
+#screen-over .title{font-size:96px;background:linear-gradient(180deg,#ffb4a8,#b3141a 60%,#3b0507);-webkit-background-clip:text;background-clip:text}
+.stats{display:grid;grid-template-columns:1fr auto;gap:10px 30px;margin:26px 0 8px;font-size:16px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.stats b{color:#fff;text-align:right}
+.stats .best{color:var(--gold)}
+
+.shop-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.item{border:1px solid var(--line);background:rgba(255,255,255,.03);padding:14px;display:flex;flex-direction:column;gap:6px;cursor:pointer;transition:background .15s,border-color .15s;position:relative}
+.item:hover{background:rgba(179,20,26,.18);border-color:rgba(255,58,46,.5)}
+.item.off{opacity:.45;cursor:default}
+.item.off:hover{background:rgba(255,255,255,.03);border-color:var(--line)}
+.item .nm{font-weight:900;font-size:15px;letter-spacing:.12em;text-transform:uppercase}
+.item .ds{font-size:12px;color:var(--faint);line-height:1.45;min-height:34px}
+.item .pr{font-weight:900;color:var(--gold);font-size:17px}
+.item .key{position:absolute;right:10px;top:10px;font-size:11px;color:var(--faint);font-weight:800}
+.shop-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:18px}
+.shop-head .cash{font-weight:900;color:var(--gold);font-size:24px}
+#screen-click{background:rgba(0,0,0,.45);align-items:center;justify-content:center;cursor:pointer}
+#screen-click div{font-weight:800;letter-spacing:.3em;font-size:18px;text-transform:uppercase;padding:16px 26px;border:1px solid var(--line);background:var(--panel)}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="lowhp"></div>
+  <div id="vignette"></div>
+  <div id="acidFx"></div>
+  <div id="crosshair"><i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i><i class="dot"></i></div>
+  <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+  <div id="dmgDirs"></div>
+  <div id="combo"></div>
+  <div class="hud-box" id="waveBox"><div id="waveNum">ВОЛНА <b>1</b></div><div id="waveLeft">Зомби: 0</div></div>
+  <div id="bossBar" class="hidden"><div class="name">МЯСНИК</div><div class="bar"><i></i></div></div>
+  <div id="breakTimer" class="hidden"></div>
+  <div class="hud-box" id="scoreBox"><div id="score">0</div><div id="money">$ 0</div></div>
+  <div id="feed"></div>
+  <div class="hud-box" id="radarWrap"><canvas id="radar" width="200" height="200"></canvas></div>
+  <div class="hud-box" id="vitals">
+    <div class="vrow"><svg viewBox="0 0 24 24"><path fill="#d8312a" d="M9 2h6v7h7v6h-7v7H9v-7H2V9h7z"/></svg>
+      <div class="vbar" id="hpBar"><i class="lag"></i><i class="val"></i></div><div class="vnum" id="hpNum">100</div></div>
+    <div class="vrow" id="arRow"><svg viewBox="0 0 24 24"><path fill="#4aa3ff" d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/></svg>
+      <div class="vbar" id="arBar"><i class="val"></i></div><div class="vnum" id="arNum">0</div></div>
+    <div id="stamBar"><i></i></div>
+  </div>
+  <div class="hud-box" id="ammoBox">
+    <div id="ammoMain">12<small>/ ∞</small></div>
+    <div id="weapName">Пистолет</div>
+    <div id="grenades">2<svg viewBox="0 0 24 24"><path fill="#cfc8b8" d="M10 3h4v2h-4zM8 6h8l1 2a7 7 0 1 1-10 0z"/></svg></div>
+    <div id="slots"></div>
+  </div>
+  <div id="center"><div id="banner"><div class="t1"></div><div class="t2"></div></div><div id="msg"></div></div>
+  <div id="hint"></div>
+  <div id="fps"></div>
+</div>
+
+<div id="screen-loading" class="screen">
+  <div class="title">ЯМА</div>
+  <div id="loadBar"><i></i></div>
+  <div id="loadText">Загрузка</div>
+</div>
+
+<div id="screen-menu" class="screen hidden">
+  <div class="menu-col">
+    <div class="title">ЯМА</div>
+    <div class="sub">Ночь. Поле. Провал. Они уже лезут.</div>
+    <button class="btn" data-act="play">Играть</button>
+    <button class="btn" data-act="controls">Управление</button>
+    <button class="btn" data-act="settings">Настройки</button>
+    <div class="menu-foot" id="menuBest"></div>
+  </div>
+</div>
+
+<div id="screen-pause" class="screen hidden">
+  <div class="menu-col">
+    <div class="title">ПАУЗА</div>
+    <div class="sub" style="margin-bottom:34px">Яма подождёт. Недолго.</div>
+    <button class="btn" data-act="resume">Продолжить</button>
+    <button class="btn" data-act="settings">Настройки</button>
+    <button class="btn" data-act="controls">Управление</button>
+    <button class="btn" data-act="quit">Выйти в меню</button>
+  </div>
+</div>
+
+<div id="screen-controls" class="screen hidden">
+  <div class="dialog panel">
+    <h2>УПРАВЛЕНИЕ</h2>
+    <div class="keys">
+      <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div><div>Движение</div>
+      <div><kbd>Мышь</kbd></div><div>Обзор</div>
+      <div><kbd>ЛКМ</kbd></div><div>Стрельба</div>
+      <div><kbd>ПКМ</kbd></div><div>Прицеливание</div>
+      <div><kbd>R</kbd></div><div>Перезарядка</div>
+      <div><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / колесо</div><div>Смена оружия</div>
+      <div><kbd>V</kbd></div><div>Удар ножом</div>
+      <div><kbd>G</kbd></div><div>Граната</div>
+      <div><kbd>Shift</kbd></div><div>Бег</div>
+      <div><kbd>Ctrl</kbd> / <kbd>C</kbd></div><div>Присесть</div>
+      <div><kbd>Пробел</kbd></div><div>Прыжок</div>
+      <div><kbd>F</kbd></div><div>Фонарик</div>
+      <div><kbd>B</kbd></div><div>Магазин (между волнами)</div>
+      <div><kbd>N</kbd></div><div>Начать следующую волну сразу</div>
+      <div><kbd>Esc</kbd></div><div>Пауза</div>
+    </div>
+    <div class="tips">Стреляйте в голову — урон втрое выше. Конечности можно отстрелить: зомби без ног ползёт.
+      Толстяк взрывается кислотой — не подпускайте его близко. Плевун атакует издалека. Каждая пятая волна — Мясник.</div>
+    <div class="actions"><button class="btn small" data-act="back">Назад</button></div>
+  </div>
+</div>
+
+<div id="screen-settings" class="screen hidden">
+  <div class="dialog panel">
+    <h2>НАСТРОЙКИ</h2>
+    <div class="row"><label>Чувствительность мыши</label><input type="range" id="setSens" min="0.2" max="3" step="0.05"><span class="val" id="valSens"></span></div>
+    <div class="row"><label>Яркость</label><input type="range" id="setBright" min="0.6" max="1.8" step="0.05"><span class="val" id="valBright"></span></div>
+    <div class="row"><label>Поле зрения</label><input type="range" id="setFov" min="60" max="100" step="1"><span class="val" id="valFov"></span></div>
+    <div class="row"><label>Общая громкость</label><input type="range" id="setVol" min="0" max="1" step="0.05"><span class="val" id="valVol"></span></div>
+    <div class="row"><label>Музыка</label><input type="range" id="setMusic" min="0" max="1" step="0.05"><span class="val" id="valMusic"></span></div>
+    <div class="row"><label>Графика</label><div class="seg" id="setQuality"><button data-q="low">Низкая</button><button data-q="medium">Средняя</button><button data-q="high">Высокая</button></div></div>
+    <div class="row"><label>Сложность</label><div class="seg" id="setDiff"><button data-d="easy">Лёгкая</button><button data-d="normal">Обычная</button><button data-d="hard">Хардкор</button></div></div>
+    <div class="row"><label>Инверсия по Y</label><div class="seg" id="setInvert"><button data-v="0">Нет</button><button data-v="1">Да</button></div></div>
+    <div class="row"><label>Счётчик FPS</label><div class="seg" id="setFps"><button data-v="0">Нет</button><button data-v="1">Да</button></div></div>
+    <div class="actions"><button class="btn small" data-act="back">Назад</button></div>
+  </div>
+</div>
+
+<div id="screen-shop" class="screen hidden">
+  <div class="dialog panel" style="width:min(860px,94vw)">
+    <div class="shop-head"><h2 style="margin:0">СНАБЖЕНИЕ</h2><div class="cash" id="shopCash">$ 0</div></div>
+    <div class="shop-grid" id="shopGrid"></div>
+    <div class="actions"><button class="btn small" data-act="closeShop">Закрыть (B)</button><button class="btn small" data-act="nextWave">Следующая волна (N)</button></div>
+  </div>
+</div>
+
+<div id="screen-over" class="screen hidden">
+  <div class="dialog panel" style="width:min(560px,92vw)">
+    <div class="title">ВЫ ПОГИБЛИ</div>
+    <div class="stats" id="overStats"></div>
+    <div class="actions"><button class="btn small" data-act="restart">Ещё раз</button><button class="btn small" data-act="menu">В меню</button></div>
+  </div>
+</div>
+
+<div id="screen-click" class="screen hidden"><div>Кликните, чтобы продолжить</div></div>
+<!--APP-->
+</body>
+</html>
