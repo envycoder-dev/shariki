@@ -1,0 +1,16 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { makeNoise2D } from '../src/core/noise.js';
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight); renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x101820);
+const cam = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 100); cam.position.set(3, 2, 4); cam.lookAt(0, 0.5, 0);
+new OrbitControls(cam, renderer.domElement);
+scene.add(new THREE.HemisphereLight(0x8899ff, 0x222211, 1));
+const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(3, 5, 2); sun.castShadow = true; scene.add(sun);
+const n = makeNoise2D(3);
+const box = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xcc4422 })); box.position.y = 0.5 + n(0.3, 0.7) * 0.1; box.castShadow = true; scene.add(box);
+const g = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), new THREE.MeshStandardMaterial({ color: 0x445533 })); g.rotation.x = -Math.PI / 2; g.receiveShadow = true; scene.add(g);
+let f = 0; renderer.setAnimationLoop(() => { box.rotation.y += 0.01; renderer.render(scene, cam); if (++f === 3) window.__ready = true; });
