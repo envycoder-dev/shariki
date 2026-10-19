@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Муха Дрозофила на велосипеде</title>
+<style>
+@font-face{
+  font-family:'Montserrat';
+  font-style:normal;
+  font-weight:400 900;
+  font-display:swap;
+  src:url(fonts/montserrat-cyrillic.woff2) format('woff2');
+  unicode-range:U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face{
+  font-family:'Montserrat';
+  font-style:normal;
+  font-weight:400 900;
+  font-display:swap;
+  src:url(fonts/montserrat-latin.woff2) format('woff2');
+  unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+html,body{margin:0;min-height:100%;background:#0b1020}
+body{
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-family:'Montserrat',system-ui,sans-serif;color:#fff;
+}
+h1{font-weight:800;font-size:clamp(18px,3.4vw,32px);margin:12px 16px 10px;text-align:center}
+h1 span{color:#ff3fa4}
+.stage{width:min(96vw,1000px);aspect-ratio:8/5;border-radius:22px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.55)}
+svg{display:block;width:100%;height:100%;cursor:pointer}
+.controls{display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:center;margin:14px 0;font-weight:600;font-size:14px}
+button{font:inherit;color:#fff;background:#ff3fa4;border:0;border-radius:999px;padding:8px 20px;cursor:pointer}
+label{display:flex;gap:10px;align-items:center}
+input[type=range]{accent-color:#ff3fa4}
+</style>
+</head>
+<body>
+<h1>Муха <span>Дрозофила</span> на велосипеде</h1>
+
+<div class="stage">
+<svg id="scene" viewBox="0 0 800 500" role="img" aria-label="Мультяшная плодовая мушка дрозофила едет на велосипеде">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7cc8ff"/>
+      <stop offset="1" stop-color="#e3f6ff"/>
+    </linearGradient>
+    <radialGradient id="eyeG" cx="0.4" cy="0.35" r="0.75">
+      <stop offset="0" stop-color="#ff5a45"/>
+      <stop offset="0.55" stop-color="#c3000f"/>
+      <stop offset="1" stop-color="#5c0006"/>
+    </radialGradient>
+    <pattern id="facets" width="4" height="3.5" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="1.75" r="1.5" fill="none" stroke="rgba(0,0,0,.22)" stroke-width=".5"/>
+    </pattern>
+    <radialGradient id="thoraxG" cx="0.45" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#e2b277"/>
+      <stop offset="1" stop-color="#94622e"/>
+    </radialGradient>
+    <radialGradient id="headG" cx="0.4" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#e8bd84"/>
+      <stop offset="1" stop-color="#a8723a"/>
+    </radialGradient>
+    <linearGradient id="abdG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0b070"/>
+      <stop offset="1" stop-color="#a26b33"/>
+    </linearGradient>
+    <linearGradient id="wingG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,.65)"/>
+      <stop offset="0.5" stop-color="rgba(200,225,255,.35)"/>
+      <stop offset="1" stop-color="rgba(255,200,255,.4)"/>
+    </linearGradient>
+    <clipPath id="abdClip"><ellipse cx="0" cy="0" rx="42" ry="27"/></clipPath>
+
+    <g id="cloud">
+      <circle cx="0" cy="0" r="22" fill="#fff"/>
+      <circle cx="26" cy="-10" r="28" fill="#fff"/>
+      <circle cx="56" cy="0" r="22" fill="#fff"/>
+      <rect x="0" y="0" width="56" height="20" fill="#fff"/>
+    </g>
+
+    <g id="hillsFar">
+      <path d="M0 330 Q100 262 200 300 Q300 338 400 292 Q500 250 600 300 Q700 345 800 330 L800 400 L0 400 Z" fill="#a6d8a8"/>
+    </g>
+    <g id="hillsNear">
+      <path d="M0 372 Q130 318 260 356 Q390 392 520 346 Q660 300 800 372 L800 400 L0 400 Z" fill="#7cc46c"/>
+      <g>
+        <rect x="128" y="318" width="6" height="22" fill="#7a5230"/>
+        <circle cx="131" cy="310" r="16" fill="#4f9e45"/>
+        <rect x="610" y="306" width="6" height="24" fill="#7a5230"/>
+        <circle cx="613" cy="298" r="18" fill="#4f9e45"/>
+        <circle cx="636" cy="312" r="11" fill="#5cae50"/>
+      </g>
+    </g>
+
+    <g id="flowers">
+      <g transform="translate(40 470)">
+        <path d="M0 0 V-16" stroke="#3f8f37" stroke-width="2"/>
+        <g fill="#ff7cc3"><circle cx="0" cy="-22" r="5"/><circle cx="6" cy="-17" r="5"/><circle cx="-6" cy="-17" r="5"/><circle cx="4" cy="-11" r="5"/><circle cx="-4" cy="-11" r="5"/></g>
+        <circle cx="0" cy="-16" r="3.5" fill="#ffd54a"/>
+      </g>
+      <g transform="translate(150 486)">
+        <path d="M-8 0 Q-6 -14 -2 -18 M0 0 Q0 -16 2 -22 M8 0 Q6 -12 10 -16" stroke="#3f8f37" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      </g>
+      <g transform="translate(250 478)">
+        <path d="M0 0 V-14" stroke="#3f8f37" stroke-width="2"/>
+        <g fill="#fff"><circle cx="0" cy="-20" r="4.5"/><circle cx="5" cy="-15" r="4.5"/><circle cx="-5" cy="-15" r="4.5"/><circle cx="3" cy="-10" r="4.5"/><circle cx="-3" cy="-10" r="4.5"/></g>
+        <circle cx="0" cy="-15" r="3" fill="#ffb300"/>
+      </g>
+      <g transform="translate(340 492)">
+        <path d="M-6 0 Q-4 -12 0 -16 M5 0 Q4 -10 8 -14" stroke="#3f8f37" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      </g>
+    </g>
+  </defs>
+
+  <!-- фон -->
+  <rect width="800" height="500" fill="url(#sky)"/>
+  <circle cx="680" cy="80" r="62" fill="#fff3b0" opacity=".45"/>
+  <circle cx="680" cy="80" r="38" fill="#ffe27a"/>
+  <g id="clouds">
+    <use href="#cloud" opacity=".95"/>
+    <use href="#cloud" opacity=".85"/>
+    <use href="#cloud" opacity=".9"/>
+    <use href="#cloud" opacity=".8"/>
+  </g>
+  <g id="farLayer"><use href="#hillsFar"/><use href="#hillsFar" x="800"/></g>
+  <g id="nearLayer"><use href="#hillsNear"/><use href="#hillsNear" x="800"/></g>
+
+  <rect x="0" y="380" width="800" height="120" fill="#5fb544"/>
+  <rect x="0" y="392" width="800" height="54" fill="#7b808a"/>
+  <rect x="0" y="392" width="800" height="3" fill="#9aa0aa"/>
+  <rect x="0" y="443" width="800" height="3" fill="#62666e"/>
+  <g id="dashes"></g>
+
+  <ellipse cx="390" cy="402" rx="185" ry="7" fill="rgba(0,0,0,.2)"/>
+
+  <g id="speedLines" stroke="#fff" stroke-linecap="round" stroke-width="3" opacity=".7">
+    <line x1="0" y1="170" x2="34" y2="170"/>
+    <line x1="0" y1="205" x2="46" y2="205"/>
+    <line x1="0" y1="250" x2="28" y2="250"/>
+  </g>
+
+  <!-- дальние ноги и шатун: за рамой -->
+  <g id="farLegs"></g>
+  <g id="farCrank">
+    <line id="farArm" stroke="#6b6f76" stroke-width="5" stroke-linecap="round"/>
+    <rect id="farPedal" width="22" height="6" rx="2" fill="#4a4d52"/>
+  </g>
+
+  <!-- велосипед -->
+  <g id="wheelR">
+    <circle cx="250" cy="330" r="66" fill="none" stroke="#24262b" stroke-width="9"/>
+    <circle cx="250" cy="330" r="60" fill="none" stroke="#c9ced6" stroke-width="3"/>
+    <g id="spokesR"></g>
+    <circle cx="250" cy="330" r="6" fill="#8d939b"/>
+  </g>
+  <g id="wheelF">
+    <circle cx="530" cy="330" r="66" fill="none" stroke="#24262b" stroke-width="9"/>
+    <circle cx="530" cy="330" r="60" fill="none" stroke="#c9ced6" stroke-width="3"/>
+    <g id="spokesF"></g>
+    <circle cx="530" cy="330" r="6" fill="#8d939b"/>
+  </g>
+
+  <path id="chain" d="M375 324 L250 322 A8 8 0 0 0 250 338 L375 356 A16 16 0 0 0 375 324 Z"
+        fill="none" stroke="#3c3f44" stroke-width="2.5" stroke-dasharray="3 2"/>
+  <circle cx="250" cy="330" r="8" fill="none" stroke="#666" stroke-width="2"/>
+
+  <g fill="none" stroke="#ff3fa4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M375 340 L250 330 L348 242 Z"/>
+    <path d="M348 242 L490 236"/>
+    <path d="M375 340 L498 262"/>
+    <path d="M490 232 L500 268"/>
+  </g>
+  <path d="M500 266 Q512 300 530 330" fill="none" stroke="#e02d8c" stroke-width="7" stroke-linecap="round"/>
+  <path d="M490 234 L494 206" stroke="#9aa0a8" stroke-width="6" stroke-linecap="round"/>
+  <path d="M494 206 Q500 196 486 194 L468 196" fill="none" stroke="#3a3d42" stroke-width="5" stroke-linecap="round"/>
+  <path d="M344 228 L348 242" stroke="#9aa0a8" stroke-width="5" stroke-linecap="round"/>
+  <path d="M310 220 Q340 212 370 218 Q374 226 362 228 L322 228 Q306 227 310 220 Z" fill="#2c2e33"/>
+
+  <!-- корзинка с бананом -->
+  <path d="M528 184 Q546 168 568 176 Q556 178 546 186 Z" fill="#ffd93b" stroke="#c9a21a" stroke-width="1.5"/>
+  <circle cx="518" cy="192" r="7" fill="#e3203a"/>
+  <path d="M518 185 Q520 178 525 176" stroke="#3f8f37" stroke-width="1.5" fill="none"/>
+  <path d="M502 194 L572 194 L562 236 L512 236 Z" fill="#d39448" stroke="#9a6328" stroke-width="2"/>
+  <g stroke="#9a6328" stroke-width="1.5">
+    <line x1="505" y1="208" x2="569" y2="208"/>
+    <line x1="508" y1="222" x2="565" y2="222"/>
+    <line x1="522" y1="194" x2="526" y2="236"/>
+    <line x1="537" y1="194" x2="537" y2="236"/>
+    <line x1="552" y1="194" x2="548" y2="236"/>
+  </g>
+  <path d="M500 230 L512 236" stroke="#9aa0a8" stroke-width="3"/>
+
+  <circle cx="375" cy="340" r="16" fill="none" stroke="#555a61" stroke-width="3" stroke-dasharray="2.5 1.6"/>
+  <circle cx="375" cy="340" r="5" fill="#8d939b"/>
+
+  <!-- муха -->
+  <g class="bob">
+    <g id="farWing" transform="translate(372 150)">
+      <path d="M0 0 C-28 -26 -98 -34 -124 -10 C-112 10 -44 14 0 0 Z" fill="url(#wingG)" stroke="rgba(90,110,140,.7)" stroke-width="1.2"/>
+    </g>
+    <g transform="translate(328 196) rotate(-24)">
+      <ellipse cx="0" cy="0" rx="42" ry="27" fill="url(#abdG)"/>
+      <g clip-path="url(#abdClip)" fill="#4a2e14" opacity=".85">
+        <rect x="-44" y="-30" width="16" height="60"/>
+        <rect x="-22" y="-30" width="7" height="60"/>
+        <rect x="-6" y="-30" width="7" height="60"/>
+        <rect x="10" y="-30" width="6" height="60"/>
+      </g>
+      <ellipse cx="6" cy="-12" rx="22" ry="7" fill="#fff" opacity=".18"/>
+    </g>
+    <ellipse cx="382" cy="168" rx="30" ry="27" fill="url(#thoraxG)"/>
+    <g stroke="#3b2410" stroke-width="1.6" stroke-linecap="round">
+      <line x1="372" y1="144" x2="368" y2="136"/>
+      <line x1="384" y1="142" x2="384" y2="134"/>
+      <line x1="395" y1="145" x2="399" y2="138"/>
+    </g>
+    <g id="head">
+      <g id="antennae" stroke="#5a3a18" stroke-width="2" fill="none" stroke-linecap="round">
+        <path d="M438 128 L446 117"/>
+        <path d="M446 117 Q452 106 462 102" stroke-width="1.2"/>
+        <path d="M449 112 l3 -6 M453 108 l5 -4 M455 106 l1 6 M459 104 l3 4" stroke-width="1"/>
+      </g>
+      <circle cx="424" cy="146" r="21" fill="url(#headG)"/>
+      <ellipse cx="430" cy="141" rx="15" ry="17" fill="url(#eyeG)"/>
+      <ellipse cx="430" cy="141" rx="15" ry="17" fill="url(#facets)"/>
+      <ellipse cx="425" cy="133" rx="4.5" ry="3" fill="#fff" opacity=".85"/>
+      <circle cx="433" cy="136" r="1.6" fill="#fff" opacity=".8"/>
+      <path d="M438 160 Q446 166 442 172" stroke="#6b4420" stroke-width="3" fill="none" stroke-linecap="round"/>
+      <!-- шлем -->
+      <path d="M402 146 Q398 116 424 110 Q446 106 448 122 L440 124 Q428 118 414 128 Q408 136 410 148 Z" fill="#29b6f6" stroke="#0d7fb8" stroke-width="1.5"/>
+      <path d="M412 124 L420 118 M422 116 L432 114" stroke="#e3f6ff" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M409 148 Q414 158 424 166" stroke="#0d7fb8" stroke-width="1.5" fill="none"/>
+    </g>
+  </g>
+
+  <g id="nearCrank">
+    <line id="nearArm" stroke="#b4b9c0" stroke-width="5" stroke-linecap="round"/>
+    <rect id="nearPedal" width="22" height="6" rx="2" fill="#2c2e33"/>
+  </g>
+
+  <g class="bob">
+    <g id="nearWing" transform="translate(376 152)">
+      <path d="M0 0 C-28 -26 -98 -34 -124 -10 C-112 10 -44 14 0 0 Z" fill="url(#wingG)" stroke="rgba(90,110,140,.8)" stroke-width="1.2"/>
+      <path d="M0 0 C-40 -8 -80 -14 -118 -12 M-4 2 C-44 2 -84 0 -112 -4 M-30 -5 L-36 4 M-70 -9 L-74 3" fill="none" stroke="rgba(90,110,140,.55)" stroke-width="1"/>
+    </g>
+  </g>
+  <g id="nearLegs"></g>
+
+  <g id="fgLayer"><use href="#flowers"/><use href="#flowers" x="400"/><use href="#flowers" x="800"/></g>
+</svg>
+</div>
+
+<div class="controls">
+  <button id="toggle" type="button">Пауза</button>
+  <label>Скорость <input id="speed" type="range" min="0.3" max="2.5" step="0.1" value="1"></label>
+</div>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = id => document.getElementById(id);
+  const el = (tag, attrs, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+
+  const RH = { x: 250, y: 330 }, FH = { x: 530, y: 330 }, BB = { x: 375, y: 340 };
+  const WHEEL_R = 70, CRANK = 26, BASE_SPEED = 200;
+
+  for (const [g, c] of [[$('spokesR'), RH], [$('spokesF'), FH]]) {
+    for (let i = 0; i < 18; i++) {
+      const a = i / 18 * Math.PI * 2;
+      el('line', { x1: c.x, y1: c.y, x2: c.x + 60 * Math.cos(a), y2: c.y + 60 * Math.sin(a),
+        stroke: '#dfe3e8', 'stroke-width': 1.2 }, g);
+    }
+  }
+  for (let x = -90; x <= 900; x += 90) el('rect', { x, y: 417, width: 40, height: 4, rx: 2, fill: '#f4f4f4' }, $('dashes'));
+
+  // Двухзвенная нога: колено находится аналитически (обратная кинематика).
+  function ik(h, f, a, b, sign) {
+    let dx = f.x - h.x, dy = f.y - h.y, d = Math.hypot(dx, dy);
+    const max = a + b - 0.01, min = Math.abs(a - b) + 0.01;
+    let fx = f.x, fy = f.y;
+    if (d > max) { fx = h.x + dx / d * max; fy = h.y + dy / d * max; d = max; }
+    d = Math.max(d, min);
+    const base = Math.atan2(dy, dx);
+    const off = Math.acos((a * a + d * d - b * b) / (2 * a * d));
+    const ang = base + sign * off;
+    return { k: { x: h.x + a * Math.cos(ang), y: h.y + a * Math.sin(ang) }, f: { x: fx, y: fy } };
+  }
+
+  function makeLeg(parent, hip, a, b, sign, far, width) {
+    const fill = far ? '#7a5127' : '#b07a3e', line = far ? '#3d2710' : '#5a3a18';
+    const g = el('g', { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', fill: 'none' }, parent);
+    const outline = el('path', { stroke: line, 'stroke-width': width + 2.4 }, g);
+    const inner = el('path', { stroke: fill, 'stroke-width': width }, g);
+    const claw = el('path', { stroke: line, 'stroke-width': 1.6 }, g);
+    return {
+      update(target, bob) {
+        const h = { x: hip.x, y: hip.y + bob };
+        const { k, f } = ik(h, target, a, b, sign);
+        const d = `M${h.x} ${h.y} L${k.x} ${k.y} L${f.x} ${f.y}`;
+        outline.setAttribute('d', d);
+        inner.setAttribute('d', d);
+        claw.setAttribute('d', `M${f.x - 4} ${f.y + 2} L${f.x} ${f.y} L${f.x + 4} ${f.y + 2}`);
+      }
+    };
+  }
+
+  const legs = {
+    farRear:   makeLeg($('farLegs'),  { x: 372, y: 192 }, 88, 88, -1, true, 4.5),
+    farMid:    makeLeg($('farLegs'),  { x: 382, y: 192 }, 38, 38,  1, true, 3.5),
+    farFront:  makeLeg($('farLegs'),  { x: 394, y: 184 }, 42, 42, -1, true, 3.5),
+    nearRear:  makeLeg($('nearLegs'), { x: 378, y: 196 }, 88, 88, -1, false, 5),
+    nearMid:   makeLeg($('nearLegs'), { x: 388, y: 196 }, 40, 40,  1, false, 4),
+    nearFront: makeLeg($('nearLegs'), { x: 400, y: 186 }, 42, 42, -1, false, 4),
+  };
+
+  const clouds = [...$('clouds').children];
+  const cloudBase = [[60, 70, 1], [300, 125, .7], [540, 55, .9], [780, 140, .6]];
+  const bobEls = [...document.querySelectorAll('.bob')];
+  const speedLines = [...$('speedLines').children];
+  const mod = (v, m) => ((v % m) + m) % m;
+  const smooth = x => x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x);
+
+  function setCrank(arm, pedal, ang) {
+    const p = { x: BB.x + CRANK * Math.cos(ang), y: BB.y + CRANK * Math.sin(ang) };
+    arm.setAttribute('x1', BB.x); arm.setAttribute('y1', BB.y);
+    arm.setAttribute('x2', p.x); arm.setAttribute('y2', p.y);
+    pedal.setAttribute('x', p.x - 11); pedal.setAttribute('y', p.y - 1);
+    return { x: p.x, y: p.y };
+  }
+
+  let dist = 0, time = 0, last = null;
+  let playing = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const speedInput = $('speed'), btn = $('toggle');
+
+  function render() {
+    const wheelAng = dist / WHEEL_R;
+    const crank = wheelAng * 0.8;
+    const bob = Math.sin(crank * 2) * 1.6;
+
+    const deg = wheelAng * 180 / Math.PI;
+    $('spokesR').setAttribute('transform', `rotate(${deg} ${RH.x} ${RH.y})`);
+    $('spokesF').setAttribute('transform', `rotate(${deg} ${FH.x} ${FH.y})`);
+    $('chain').setAttribute('stroke-dashoffset', -crank * 16);
+
+    const nearP = setCrank($('nearArm'), $('nearPedal'), crank);
+    const farP = setCrank($('farArm'), $('farPedal'), crank + Math.PI);
+
+    for (const e of bobEls) e.setAttribute('transform', `translate(0 ${bob})`);
+    const flutter = Math.sin(time * 26) * 3;
+    $('farWing').setAttribute('transform', `translate(372 ${150}) rotate(${-4 + flutter})`);
+    $('nearWing').setAttribute('transform', `translate(376 ${152}) rotate(${10 + flutter})`);
+    $('antennae').setAttribute('transform', `rotate(${Math.sin(time * 5) * 7} 438 128)`);
+
+    legs.farRear.update({ x: farP.x + 2, y: farP.y }, bob);
+    legs.nearRear.update({ x: nearP.x + 2, y: nearP.y }, bob);
+    legs.farFront.update({ x: 472, y: 194 }, bob);
+    legs.nearFront.update({ x: 468, y: 197 }, bob);
+    legs.farMid.update({ x: 420 + Math.sin(time * 2) * 2, y: 238 }, bob);
+
+    // Каждые 7 секунд муха машет ближней средней лапкой.
+    const phase = mod(time, 7);
+    const w = smooth((phase - 4) / 0.4) * (1 - smooth((phase - 6.2) / 0.4));
+    const rest = { x: 426, y: 238 };
+    const wave = { x: 474, y: 130 + Math.sin(time * 14) * 14 };
+    legs.nearMid.update({ x: rest.x + (wave.x - rest.x) * w, y: rest.y + (wave.y - rest.y) * w }, bob);
+
+    clouds.forEach((c, i) => {
+      const [bx, by, s] = cloudBase[i];
+      const x = mod(bx - dist * 0.06, 960) - 120;
+      c.setAttribute('transform', `translate(${x} ${by}) scale(${s})`);
+    });
+    $('farLayer').setAttribute('transform', `translate(${-mod(dist * 0.15, 800)} 0)`);
+    $('nearLayer').setAttribute('transform', `translate(${-mod(dist * 0.35, 800)} 0)`);
+    $('dashes').setAttribute('transform', `translate(${-mod(dist, 90)} 0)`);
+    $('fgLayer').setAttribute('transform', `translate(${-mod(dist * 1.25, 400)} 0)`);
+
+    speedLines.forEach((l, i) => {
+      const t = mod(time * 1.6 + i * 0.37, 1);
+      l.setAttribute('transform', `translate(${280 - t * 90} 0)`);
+      l.setAttribute('opacity', playing ? (1 - t) * Math.min(1, speedInput.value / 1.2) : 0);
+    });
+  }
+
+  function frame(ts) {
+    if (last === null) last = ts;
+    const dt = Math.min(0.05, (ts - last) / 1000);
+    last = ts;
+    if (playing) {
+      time += dt;
+      dist += dt * BASE_SPEED * speedInput.value;
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  function toggle() {
+    playing = !playing;
+    btn.textContent = playing ? 'Пауза' : 'Поехали!';
+  }
+  btn.textContent = playing ? 'Пауза' : 'Поехали!';
+  btn.addEventListener('click', toggle);
+  $('scene').addEventListener('click', toggle);
+  addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); toggle(); } });
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
