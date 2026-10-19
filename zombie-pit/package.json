@@ -1,0 +1,16 @@
+{
+  "name": "zombie-pit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ЯМА — 3D шутер от первого лица: зомби лезут из ямы",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "shot": "node tools/shot.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.64.1",
+    "three": "^0.186.1"
+  }
+}
