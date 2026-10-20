@@ -1595,10 +1595,17 @@ window.addEventListener('pointercancel', pressOffAll);
 
 /* один обработчик на оба вида ввода: pointerdown для мыши и пальца, keydown для Enter и пробела */
 function onActivate(node, fn){
-  node.addEventListener('pointerdown', function(e){ e.preventDefault(); fn(e); });
+  let handledAt = -1e9;
+  node.addEventListener('pointerdown', function(e){ e.preventDefault(); handledAt = performance.now(); fn(e); });
   node.addEventListener('keydown', function(e){
     if(e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
     e.preventDefault();
+    handledAt = performance.now();
+    fn(e);
+  });
+  /* скринридеры и голосовое управление шлют только click — его тоже ловим, но без дубля после pointerdown */
+  node.addEventListener('click', function(e){
+    if(performance.now() - handledAt < 600) return;
     fn(e);
   });
 }
@@ -1772,10 +1779,12 @@ function volPreview(){
 function openSettings(){
   refreshPanel();
   el.mSettings.classList.add('on');
+  el.btnCloseSettings.focus();
   Platform.gameplayStop();
 }
 function closeSettings(){
   el.mSettings.classList.remove('on');
+  el.btnSettings.focus();
   Platform.gameplayStart();
 }
 onActivate(el.btnSettings, openSettings);
@@ -1807,14 +1816,27 @@ el.rngVol.addEventListener('input', function(){
 /* пишем на диск в конце движения, а не на каждый пиксель */
 el.rngVol.addEventListener('change', saveNow);
 /* ==== 14. СВОЁ ПОДТВЕРЖДЕНИЕ вместо confirm() ==== */
-let confirmCb = null;
+let confirmCb = null, confirmFrom = null;
 function askConfirm(text, yes, cb){
   el.confirmText.textContent = text;
   el.btnYes.textContent = yes;
   confirmCb = cb;
+  confirmFrom = document.activeElement;
   el.mConfirm.classList.add('on');
+  el.btnNo.focus();
 }
-function closeConfirm(){ el.mConfirm.classList.remove('on'); confirmCb = null; }
+function closeConfirm(){
+  el.mConfirm.classList.remove('on');
+  confirmCb = null;
+  if(confirmFrom && confirmFrom.focus) confirmFrom.focus();
+  confirmFrom = null;
+}
+/* Escape закрывает верхнее окно: сначала подтверждение, потом настройки */
+document.addEventListener('keydown', function(e){
+  if(e.key !== 'Escape' && e.key !== 'Esc') return;
+  if(el.mConfirm.classList.contains('on')) closeConfirm();
+  else if(el.mSettings.classList.contains('on')) closeSettings();
+});
 onActivate(el.btnNo, closeConfirm);
 onActivate(el.btnYes, function(){
   const cb = confirmCb;
