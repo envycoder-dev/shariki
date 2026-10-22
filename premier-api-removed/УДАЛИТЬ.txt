@@ -1,0 +1,15 @@
+Удалите эти файлы из проекта:
+ADMIN-MODEL-IDS-UPDATE.md
+API-TEST-RESULTS.md
+API-UPDATE.md
+DESIGN-UPDATE.md
+MODEL-IDS-UPDATE.md
+api-keys.js
+model-ids.js
+public-api.js
+public/developers.css
+public/developers.html
+public/developers.js
+public/en/developers.html
+public/en/developers.js
+public/theme/developers.gen.css
