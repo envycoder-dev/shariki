@@ -1,0 +1,12 @@
+{
+  "name": "premier",
+  "private": true,
+  "description": "Premier — чат с ИИ-моделями и API для Cursor, Codex, Claude Code",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"tests/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
