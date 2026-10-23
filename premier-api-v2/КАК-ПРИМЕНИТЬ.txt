@@ -1,0 +1,19 @@
+Premier — новый API для Cursor, Codex, Claude Code
+
+1. Скопируйте содержимое этой папки поверх проекта (структура папок сохранена).
+   Удалять ничего не нужно.
+2. Только если прошлый архив (premier-api-removed) ещё не применяли: удалите старые файлы
+   api-keys.js, public-api.js, model-ids.js, public/theme/developers.gen.css
+   (public/developers.* из этого архива их заменяют — их не удаляйте).
+3. Перезапустите сервер. Проверка: npm test  (тест API — tests/api.test.js).
+
+Новое:
+  api/                      — шлюз: /v1 (Chat Completions, Responses, Anthropic Messages), ключи,
+                              журнал, подключение одной командой, инструкции для инструментов
+  public/developers.*       — кабинет разработчика /developers (RU/EN, светлая и тёмная тема)
+  locales/api.en.json       — английские тексты ошибок кабинета
+  tests/api.test.js, tests/fixtures/fake-provider.js — тест API с поддельным провайдером
+  package.json              — npm test / npm start
+Изменено: server.js, billing.js, language.js, public/panel.js (+panel.html), вкладка «API» в
+настройках аккаунта (public/js/10-account.js, public/en/js/10-account.js, chat.html), тарифы на
+главной (index.html), README.md, premier-db-schema.sql, tests/reviews.test.js.
