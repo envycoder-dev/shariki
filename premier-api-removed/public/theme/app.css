@@ -1,0 +1,51 @@
+/* Рабочий интерфейс в теме «Бумага и янтарь»: ручной слой поверх *.gen.css. */
+:root{
+  --bg:var(--p-bg);--side:var(--p-sunken);--raised:var(--p-surface);--hover:var(--p-surface-2);
+  --line:var(--p-line);--line2:var(--p-line-2);
+  --text:var(--p-text);--muted:var(--p-muted);--dim:var(--p-dim);--code:var(--p-sunken);
+  --accent:var(--p-accent);--accent-h:var(--p-accent-h);--accent-l:var(--p-accent-ink);--accent-t:var(--p-accent-soft);
+}
+body{background:var(--p-bg);color:var(--p-text)}
+::selection{background:var(--p-marker)}
+:focus-visible{outline-color:var(--p-accent)}
+.mark{background:transparent;color:var(--p-text)}
+.btn.pri,.send{background:var(--p-accent);color:var(--p-on-accent)}
+.btn.pri:hover,.send:not(:disabled):hover{background:var(--p-accent-h)}
+
+/* поле ввода — главный объект экрана: белая карточка с мягкой тенью */
+.dock .box{background:var(--p-surface);border-color:var(--p-line-2);box-shadow:var(--p-shadow-lg)}
+.dock .box:focus-within{border-color:var(--p-accent-line);box-shadow:0 0 0 3px var(--p-accent-soft),var(--p-shadow-lg)}
+.send:disabled{background:var(--p-surface-2);color:var(--p-dim)}
+
+/* сообщения: у пользователя мягкая плашка, ответ — как документ без плашки */
+.u .bub{background:var(--p-surface-2);border-color:transparent}
+
+/* пустой чат */
+.hello h1{font-family:var(--p-font-display);font-weight:650;letter-spacing:-.03em}
+.sugg button{background:var(--p-surface);border-color:var(--p-line);box-shadow:var(--p-shadow-sm);transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease}
+.sugg button:hover{background:var(--p-surface);border-color:var(--p-accent-line);transform:translateY(-1px)}
+.sugg svg{color:var(--p-accent)}
+
+.av{background:var(--p-accent-soft);color:var(--p-accent-ink);font-weight:650}
+
+/* вход: карточка белая, обёртка прозрачная */
+main.box{background:transparent}
+.wrap2 .card{background:var(--p-surface);box-shadow:var(--p-shadow-lg)}
+.pitch h2{font-family:var(--p-font-display);letter-spacing:-.03em}
+.pitch h2 span{background:linear-gradient(transparent 58%,var(--p-marker) 58%,var(--p-marker) 90%,transparent 90%);-webkit-background-clip:border-box;background-clip:border-box;color:var(--p-text);-webkit-text-fill-color:currentColor}
+.gbtn{background:var(--p-surface);color:var(--p-text);border-color:var(--p-line-2)}
+.gbtn:hover{background:var(--p-surface-2)}
+.ghbtn{background:var(--p-text);color:var(--p-bg);border-color:var(--p-text)}
+.ghbtn:hover{background:color-mix(in srgb,var(--p-text) 85%,var(--p-bg))}
+
+/* админ-панель */
+body:has(#app) {--card:var(--p-surface);--card2:var(--p-surface-2);--side:var(--p-surface-2)}
+.nav a.it.on{background:var(--p-surface);box-shadow:var(--p-shadow-sm)}
+.login{background:var(--p-bg)}
+.lcard{background:var(--p-surface);box-shadow:var(--p-shadow-lg)}
+.lcard h1{font-family:var(--p-font-display);letter-spacing:-.03em}
+.top h1,#vtitle{font-family:var(--p-font-display);letter-spacing:-.025em}
+/* закрытое меню не должно отбрасывать тень на экран */
+@media (max-width:900px){.nav:not(.open){box-shadow:none}}
+/* сетка обзора 3fr/2fr задана инлайном и не складывается на телефоне */
+@media (max-width:760px){#view .grid[style*="3fr"]{grid-template-columns:minmax(0,1fr)!important}}
