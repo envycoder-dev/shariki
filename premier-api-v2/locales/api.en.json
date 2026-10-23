@@ -1,0 +1,14 @@
+{
+  "Название ключа: от 1 до 60 символов": "Key name: 1 to 60 characters",
+  "Модели: список из 1–100 ID": "Models: a list of 1–100 IDs",
+  "IP-адресов: не больше 50": "IP addresses: 50 at most",
+  "Не похоже на IP-адрес или подсеть": "Not an IP address or subnet",
+  "Срок ключа: от 1 до 365 дней или без срока": "Key lifetime: 1 to 365 days, or no expiry",
+  "Можно держать не больше 10 ключей. Отзовите ненужный и попробуйте снова.": "You can have up to 10 keys. Revoke one you no longer need and try again.",
+  "Ключ не найден": "Key not found",
+  "Код устарел или не найден": "The code has expired or was not found",
+  "Нет модели с ID": "No model with ID",
+  "Напишите сообщение": "Write a message",
+  "На вашем тарифе пока нет моделей для API": "Your plan has no API models yet",
+  "Запрос должен быть с вашего сайта и в формате JSON": "The request must come from this site and be JSON"
+}
