@@ -1,0 +1,244 @@
+diff --git a/static/i18n.js b/static/i18n.js
+index bfbf064..1fefa8f 100644
+--- a/static/i18n.js
++++ b/static/i18n.js
+@@ -916,6 +916,12 @@
+ "популярная": "popular",
+ "· популярная": "· popular",
+ "(изображения)": "(images)",
++"Токенов в месяц": "Tokens per month",
++"Тип нагрузки": "Workload",
++"Чат-бот": "Chatbot",
++"Документы": "Documents",
++"Генерация": "Generation",
++"Дешевле всех:": "Cheapest:",
+ };
+   const CYR = /[А-Яа-яЁё]/;
+   const SKIP = 'script,style,textarea,input,pre,code,.code,.term,.tk-b,.msg,.att-n,.keybox,[data-noi18n]';
+diff --git a/static/index.html b/static/index.html
+index dae064c..8b6d73f 100644
+--- a/static/index.html
++++ b/static/index.html
+@@ -11,18 +11,18 @@
+ <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+-<link rel="stylesheet" href="/static/style.css?v=17">
+-<link rel="stylesheet" href="/static/fx.css?v=17">
+-<link rel="stylesheet" href="/static/landing.css?v=17">
++<link rel="stylesheet" href="/static/style.css?v=18">
++<link rel="stylesheet" href="/static/fx.css?v=18">
++<link rel="stylesheet" href="/static/landing.css?v=18">
+ <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light'</script>
+ </head>
+ <body>
+ <div id="app"></div>
+ <div id="toasts"></div>
+-<script src="/static/i18n.js?v=17"></script>
+-<script src="/static/brands.js?v=17"></script>
+-<script src="/static/app.js?v=17"></script>
+-<script src="/static/landing.js?v=17"></script>
+-<script src="/static/fx.js?v=17"></script>
++<script src="/static/i18n.js?v=18"></script>
++<script src="/static/brands.js?v=18"></script>
++<script src="/static/app.js?v=18"></script>
++<script src="/static/landing.js?v=18"></script>
++<script src="/static/fx.js?v=18"></script>
+ </body>
+ </html>
+diff --git a/static/landing.css b/static/landing.css
+index 3758027..4935cd1 100644
+--- a/static/landing.css
++++ b/static/landing.css
+@@ -58,6 +58,35 @@
+ .lp-mn{display:flex;flex-direction:column;gap:2px}.lp-mn b{font-weight:500}.lp-mn .mono{font-size:11.5px}
+ .lp-all{display:block;width:100%;padding:12px;border:0;border-top:1px solid var(--bd);background:var(--s1);color:var(--link);font-weight:500;cursor:pointer}
+ .lp-all:hover{background:var(--s2)}
++.lp-pr .lp-vc{background:color-mix(in srgb,var(--accent) 5%,transparent)}
++.lp-pr th.lp-vc{background:color-mix(in srgb,var(--accent) 10%,var(--s2));color:var(--tx)}
++.lp-vc .badge{height:20px;margin-right:8px}
++
++/* volume calculator */
++.lp-vol{border:1px solid var(--bd);border-radius:var(--r-md);background:var(--s1);padding:20px 22px 16px;margin-bottom:16px}
++.lp-vol-top{display:flex;justify-content:space-between;align-items:flex-end;gap:14px 24px;flex-wrap:wrap}
++.lp-vol-l{font-size:12.5px;color:var(--tx3);margin-bottom:2px}
++.lp-vol-v{font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1.2}
++.lp-vol-mix{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
++.lp-vol-mix .pills button{white-space:nowrap}.lp-vol-mix .pills button span{margin-left:2px;color:var(--tx3);font-weight:400}
++.lp-rng{--p:50%;-webkit-appearance:none;appearance:none;display:block;width:100%;height:20px;margin:18px 0 0;background:none;cursor:pointer;touch-action:pan-y}
++.lp-rng:focus{outline:none}
++.lp-rng::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:linear-gradient(var(--accent),var(--accent)) 0/var(--p) 100% no-repeat,var(--s3)}
++.lp-rng::-moz-range-track{height:6px;border-radius:3px;background:var(--s3)}
++.lp-rng::-moz-range-progress{height:6px;border-radius:3px;background:var(--accent)}
++.lp-rng::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;margin-top:-7px;border-radius:50%;background:var(--s1);border:2px solid var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .12s,box-shadow .12s}
++.lp-rng::-moz-range-thumb{box-sizing:border-box;width:20px;height:20px;border-radius:50%;background:var(--s1);border:2px solid var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.25)}
++.lp-rng:active::-webkit-slider-thumb{transform:scale(1.1)}
++.lp-rng:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var(--ring,rgba(15,98,254,.25))}
++.lp-rng:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px var(--ring,rgba(15,98,254,.25))}
++/* tick centres follow the thumb centre, which travels between thumb/2 and 100% - thumb/2 */
++.lp-ticks{position:relative;height:20px;margin-top:6px}
++.lp-ticks button{position:absolute;top:0;left:calc(10px + (100% - 20px) * var(--t));transform:translateX(-50%);padding:0 2px;border:0;background:none;color:var(--tx3);font:12px var(--font);font-variant-numeric:tabular-nums;cursor:pointer}
++.lp-ticks button:hover{color:var(--tx)}
++.lp-ticks button:first-child{left:0;transform:none}.lp-ticks button:last-child{left:auto;right:0;transform:none}
++.lp-vol-f{display:flex;justify-content:space-between;align-items:center;gap:10px 20px;flex-wrap:wrap;margin-top:12px;padding-top:14px;border-top:1px solid var(--bd);font-size:13.5px}
++.lp-vol-best{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.lp-vol-best[hidden]{display:none}
++.lp-vol-best b{font-weight:600}.lp-vol-best .btn{margin-left:8px}
+ 
+ /* code */
+ .lp-code{border:1px solid var(--bd);border-radius:var(--r-md);background:var(--s1);overflow:hidden}
+@@ -108,5 +137,7 @@
+ @media(max-width:960px){.lp-hero-in,.lp-split{grid-template-columns:1fr;gap:36px}.lp-nav{display:none}.lp-st-bh{display:none}}
+ @media(max-width:640px){.lp-w{padding:0 20px}.lp-h1{font-size:32px}.lp-lead{font-size:16px}.lp-hero{padding:44px 0}.lp-sec{padding:52px 0}
+   .lp-faq{grid-template-columns:1fr}.lp-foot-in{grid-template-columns:1fr 1fr}.lp-foot-b{grid-column:1/-1}.lp-rows>div{grid-template-columns:1fr;gap:4px}
+-  .lp-facts{flex-direction:column}.lp-facts>div+div{border-left:0;padding-left:0}.lp-pr-bar .inp{max-width:none}}
++  .lp-facts{flex-direction:column}.lp-facts>div+div{border-left:0;padding-left:0}.lp-pr-bar .inp{max-width:none}
++  .lp-vol{padding:16px}.lp-vol-v{font-size:26px}.lp-ticks .opt{display:none}.lp-vol-best .btn{margin-left:0}
++  .lp-vol-mix,.lp-vol-mix .pills{display:flex;width:100%}.lp-vol-mix .pills button{flex:1;display:flex;flex-direction:column;align-items:center;padding:5px 4px;line-height:1.35}.lp-vol-mix .pills button span{margin:0}}
+ .lp-mrow{display:flex;align-items:center;gap:12px}.lp-mrow .plogo.sm{width:28px;height:28px}.lp-mrow .plogo.sm svg{width:16px;height:16px}
+diff --git a/static/landing.js b/static/landing.js
+index c0dbbab..b5a107d 100644
+--- a/static/landing.js
++++ b/static/landing.js
+@@ -3,8 +3,12 @@
+ 'use strict';
+ const LP = {};
+ const LP_EX = { pin: 1200, pout: 400 }; // tokens used in the worked example
++// Volume calculator: the slider is continuous but logarithmic, otherwise 500K–5M would fit into the first 5% of the track.
++const LP_VOL = { min: 5e5, max: 1e8, steps: 1000, ticks: [5e5, 1e6, 5e6, 1e7, 5e7, 1e8] };
++const LP_MIX = [['Чат-бот', 3, 1], ['Документы', 10, 1], ['Генерация', 1, 3]]; // label, input : output
+ 
+ function landingPage(el, p, q, { login = false } = {}) {
++  LP.vol = LP.vol || 1e7; LP.mix = LP.mix || 0; // kept across language re-renders
+   const cfg = S.cfg, stOn = cfg.status_page !== false, host = location.origin;
+   const nav = [['prices', 'Цены'], ['connect', 'Подключение'], ['pay', 'Оплата']].concat(stOn ? [['status', 'Статус']] : [], [['faq', 'Вопросы']]);
+   const brand = `<a class="brand lp-brand" href="#/" data-go="top"><div class="logo">${LOGO}</div><span>${esc(cfg.site_name)}</span></a>`;
+@@ -27,6 +31,7 @@ function landingPage(el, p, q, { login = false } = {}) {
+ 
+   <section class="lp-sec" data-sec="prices"><div class="lp-w">
+     <div class="lp-sh"><h2>Цены</h2><p>Цена указана за 1 млн токенов, отдельно для входа и выхода. Списываем по полю <code>usage</code> из ответа модели, без округлений до тысяч.</p></div>
++    <div class="lp-vol" id="lpVol">${lpVolBox()}</div>
+     <div class="lp-pr-bar"><input class="inp" id="lpQ" type="search" placeholder="Поиск по названию модели" autocomplete="off"><span class="small dim" id="lpCnt"></span></div>
+     <div class="tbl-wrap lp-pr" id="lpPr">${lpPriceSkel()}</div>
+   </div></section>
+@@ -82,8 +87,11 @@ function landingPage(el, p, q, { login = false } = {}) {
+   root.addEventListener('click', e => {
+     const g = e.target.closest('[data-go]'); if (g) { e.preventDefault(); lpGo(g.dataset.go); return; }
+     const l = e.target.closest('[data-login]'); if (l) { e.preventDefault(); lpLogin({}); return; }
+-    const m = e.target.closest('[data-more]'); if (m) { LP.all = true; lpPrices(); }
++    const m = e.target.closest('[data-more]'); if (m) { LP.all = true; lpPrices(); return; }
++    const v = e.target.closest('[data-vol]'); if (v) { LP.vol = +v.dataset.vol; $('#lpRng').value = lpPosOf(LP.vol); lpVolUpd(); return; }
++    const x = e.target.closest('[data-mix]'); if (x) { LP.mix = +x.dataset.mix; $$('[data-mix]', root).forEach(b => b.classList.toggle('on', b === x)); lpPrices(); lpVolUpd(); }
+   });
++  $('#lpRng').oninput = e => { LP.vol = lpVolAt(+e.target.value); lpVolUpd(); };
+   $('#lpTh').onclick = e => themeSwitch(e.currentTarget);
+   const top = $('#lpTop'), links = $$('.lp-nav a', root), secs = $$('[data-sec]', root);
+   const onScroll = () => { if (!top.isConnected) return removeEventListener('scroll', onScroll);
+@@ -95,13 +103,15 @@ function landingPage(el, p, q, { login = false } = {}) {
+   $('#lpQ').oninput = e => { LP.q = e.target.value.trim().toLowerCase(); lpPrices(); };
+   LP.q = ''; LP.all = false; LP.models = null; LP.st = null;
+   lpLoadModels(host);
++  lpVolUpd();
+   if (stOn) lpStatus();
+   if (login) lpLogin(q);
+ }
+ 
+ // ---------- data
+ const lpPick = ms => ms.find(m => m.popular && m.kind !== 'image') || ms.find(m => m.kind !== 'image' && m.price_in > 0) || ms[0];
+-const lpUsd = (v, d = 2) => { const x = Number(v || 0) * ((typeof S !== 'undefined' && S.cfg && +S.cfg.usd_rub_rate) || 95);
++const lpRate = () => (typeof S !== 'undefined' && S.cfg && +S.cfg.usd_rub_rate) || 95;
++const lpUsd = (v, d = 2) => { const x = Number(v || 0) * lpRate();
+   return (Math.abs(x - Math.round(x)) < 0.005 ? Math.round(x) : x).toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: d }) + ' ₽'; };
+ async function lpLoadModels(host) {
+   let ms; try { ms = await api('/api/public/models'); } catch { ms = []; }
+@@ -111,7 +121,7 @@ async function lpLoadModels(host) {
+   $('#lpFacts').innerHTML = lpFacts(LP.models);
+   $('.lp-hero-r').innerHTML = lpReq(host, ex);
+   $('#lpCalc').innerHTML = lpCalc(ex);
+-  lpPrices();
++  lpPrices(); lpVolUpd();
+ }
+ function lpFacts(ms) {
+   const items = [];
+@@ -147,7 +157,7 @@ function lpReq(host, m) {
+ }
+ 
+ // ---------- prices table
+-const lpPriceSkel = () => `<table><tbody>${'<tr><td colspan="5"><div class="skel" style="height:16px"></div></td></tr>'.repeat(6)}</tbody></table>`;
++const lpPriceSkel = () => `<table><tbody>${'<tr><td colspan="6"><div class="skel" style="height:16px"></div></td></tr>'.repeat(6)}</tbody></table>`;
+ function lpCaps(m) {
+   const c = [];
+   if (m.vision) c.push('изображения'); if (m.tools) c.push('инструменты');
+@@ -159,16 +169,69 @@ function lpPrices() {
+   const box = $('#lpPr'); if (!box || !LP.models) return;
+   const all = LP.models.slice().sort((a, b) => (b.popular - a.popular) || String(a.family || '').localeCompare(String(b.family || '')) || a.id.localeCompare(b.id));
+   const f = LP.q ? all.filter(m => (m.id + ' ' + (m.name || '') + ' ' + (m.family || '')).toLowerCase().includes(LP.q)) : all;
+-  const LIM = 12, rows = LP.all || LP.q ? f : f.slice(0, LIM);
++  const LIM = 12, rows = LP.rows = LP.all || LP.q ? f : f.slice(0, LIM), best = lpBest();
+   $('#lpCnt').textContent = LP.models.length ? `${f.length} / ${LP.models.length}` : '';
+   if (!LP.models.length) { box.innerHTML = `<div class="lp-empty">Каталог пока пуст. Модели появятся здесь, когда администратор их включит.</div>`; return; }
+   if (!f.length) { box.innerHTML = `<div class="lp-empty">Ничего не найдено по запросу «${esc(LP.q)}».</div>`; return; }
+-  box.innerHTML = `<table><thead><tr><th>Модель</th><th class="r">Контекст</th><th class="r">Вход, ₽/1M</th><th class="r">Выход, ₽/1M</th><th>Возможности</th></tr></thead><tbody>
+-    ${rows.map(m => `<tr><td><div class="lp-mrow">${modelLogo(m, 1)}<div class="lp-mn"><b data-noi18n>${esc(m.name || m.id)}</b>${m.name && m.name !== m.id ? `<span class="mono dim" data-noi18n>${esc(m.id)}</span>` : ''}</div></div></td>
+-      <td class="r num">${lpCtx(m.context_length)}</td><td class="r num">${m.price_in ? lpUsd(m.price_in) : '—'}</td><td class="r num">${m.price_out ? lpUsd(m.price_out) : '—'}</td><td class="muted">${lpCaps(m)}</td></tr>`).join('')}
++  box.innerHTML = `<table><thead><tr><th>Модель</th><th class="r">Контекст</th><th class="r">Вход, ₽/1M</th><th class="r">Выход, ₽/1M</th><th class="r lp-vc" id="lpVolH" data-noi18n>${lpVolHead()}</th><th>Возможности</th></tr></thead><tbody>
++    ${rows.map((m, i) => `<tr><td><div class="lp-mrow">${modelLogo(m, 1)}<div class="lp-mn"><b data-noi18n>${esc(m.name || m.id)}</b>${m.name && m.name !== m.id ? `<span class="mono dim" data-noi18n>${esc(m.id)}</span>` : ''}</div></div></td>
++      <td class="r num">${lpCtx(m.context_length)}</td><td class="r num">${m.price_in ? lpUsd(m.price_in) : '—'}</td><td class="r num">${m.price_out ? lpUsd(m.price_out) : '—'}</td>
++      <td class="r num lp-vc" data-ci="${i}">${best && best.m === m ? '<span class="badge ok">дешевле всех</span>' : ''}<span>${lpSum(lpCost(m))}</span></td><td class="muted">${lpCaps(m)}</td></tr>`).join('')}
+   </tbody></table>${rows.length < f.length ? `<button class="lp-all" data-more>Показать все модели (${f.length})</button>` : ''}`;
+ }
+ 
++// ---------- volume calculator: tokens per month × input/output mix → cost of every model
++const lpVolAt = p => { const v = LP_VOL.min * (LP_VOL.max / LP_VOL.min) ** (p / LP_VOL.steps), e = 10 ** (Math.floor(Math.log10(v)) - 2);
++  return Math.round(v / e) * e; }; // 3 significant digits: smooth to drag, still readable
++const lpPosOf = v => Math.round(Math.log(v / LP_VOL.min) / Math.log(LP_VOL.max / LP_VOL.min) * LP_VOL.steps);
++function lpTok(n, short) { // 12 300 000 → «12,3 млн» / «12.3M»
++  n = +Number(n).toPrecision(3);
++  const M = n >= 1e6, v = (n / (M ? 1e6 : 1e3)).toLocaleString(I18N.locale(), { maximumFractionDigits: 2 });
++  return short || I18N.lang === 'en' ? v + (M ? 'M' : 'K') : v + (M ? ' млн' : ' тыс.');
++}
++const lpVolHead = () => (I18N.lang === 'en' ? 'For ' : 'За ') + lpTok(LP.vol);
++function lpCost(m, n = LP.vol) {
++  if (m.kind === 'image' || !(m.price_in > 0)) return null;
++  if (m.kind === 'embedding') return n * m.price_in / 1e6; // embeddings have no output tokens
++  const [, a, b] = LP_MIX[LP.mix];
++  return n * (a * m.price_in + b * m.price_out) / (a + b) / 1e6;
++}
++const lpSum = c => c == null ? '—' : lpUsd(c, c * lpRate() >= 100 ? 0 : 2);
++function lpBest() { // the ranking depends only on the mix, not on the volume
++  let best = null;
++  for (const m of LP.models || []) { if (m.kind === 'embedding') continue;
++    const c = lpCost(m); if (c != null && (!best || c < best.c)) best = { m, c }; }
++  return best;
++}
++function lpVolBox() {
++  const p = lpPosOf(LP.vol);
++  return `<div class="lp-vol-top">
++      <div><div class="lp-vol-l">Токенов в месяц</div><div class="lp-vol-v num" id="lpVolV" data-noi18n>${lpTok(LP.vol)}</div></div>
++      <div class="lp-vol-mix"><span class="small dim">Тип нагрузки</span><div class="pills" role="group" aria-label="Тип нагрузки">
++        ${LP_MIX.map(([t, a, b], i) => `<button type="button" data-mix="${i}" class="${i === LP.mix ? 'on' : ''}">${t} <span class="num" data-noi18n>${a}:${b}</span></button>`).join('')}
++      </div></div>
++    </div>
++    <input type="range" class="lp-rng" id="lpRng" min="0" max="${LP_VOL.steps}" step="1" value="${p}" style="--p:${p / LP_VOL.steps * 100}%" aria-label="Токенов в месяц">
++    <div class="lp-ticks" data-noi18n>${LP_VOL.ticks.map(v => `<button type="button" data-vol="${v}" class="${v === 5e7 ? 'opt' : ''}" style="--t:${lpPosOf(v) / LP_VOL.steps}">${lpTok(v, true)}</button>`).join('')}</div>
++    <div class="lp-vol-f">
++      <span class="muted num" id="lpVolS" data-noi18n></span>
++      <div class="lp-vol-best" id="lpVolBest" hidden><span class="dim">Дешевле всех:</span><b id="lpBestN" data-noi18n></b><b class="num" id="lpBestV"></b><button class="btn pri sm" data-login>Получить ключ</button></div>
++    </div>`;
++}
++function lpVolUpd() {
++  const rng = $('#lpRng'); if (!rng) return;
++  const n = LP.vol, [, a, b] = LP_MIX[LP.mix], en = I18N.lang === 'en', vin = lpTok(n * a / (a + b)), vout = lpTok(n * b / (a + b));
++  rng.style.setProperty('--p', rng.value / LP_VOL.steps * 100 + '%');
++  rng.setAttribute('aria-valuetext', `${lpTok(n)} ${en ? 'tokens' : 'токенов'}`);
++  $('#lpVolV').textContent = lpTok(n);
++  $('#lpVolS').textContent = en ? `${vin} input + ${vout} output` : `${vin} входных + ${vout} выходных`;
++  const best = lpBest(), bx = $('#lpVolBest');
++  bx.hidden = !best;
++  if (best) { $('#lpBestN').textContent = best.m.name || best.m.id; $('#lpBestV').textContent = lpSum(best.c); }
++  const h = $('#lpVolH'); if (h) h.textContent = lpVolHead();
++  $$('#lpPr [data-ci]').forEach(td => { td.lastElementChild.textContent = lpSum(lpCost(LP.rows[+td.dataset.ci])); });
++}
++
+ // ---------- worked billing example
+ function lpCalc(m) {
+   if (!m || !m.price_in) return `<div class="lp-calc-h">Пример расчёта</div><p class="muted small">Появится, когда в каталоге будут модели с ценами.</p>`;
