@@ -1,0 +1,452 @@
+diff --git a/README.md b/README.md
+index 8295a6c..f6d6415 100644
+--- a/README.md
++++ b/README.md
+@@ -81,6 +81,7 @@ print(client.chat.completions.create(model="claude-sonnet-4", messages=[{"role":
+ - Перепродажа доступа к API может противоречить условиям OpenAI/Anthropic и др. — проверьте условия провайдеров (или используйте агрегаторы/провайдеров, разрешающих реселлинг).
+ - Перепроверяйте цены моделей: справочные цены могут устареть.
+ - Перед приёмом платежей оформите юридическую сторону (самозанятость/ИП, оферта, политика конфиденциальности).
++- В `static/privacy.html`, `static/terms.html` и `static/index.html` метки `{{SITE_NAME}}`, `{{DOMAIN}}`, `{{PUBLIC_URL}}`, `{{YEAR}}` подставляются сервером из «Название сайта» в админке и `PUBLIC_URL`.
+ 
+ ## Тесты
+ ```bash
+diff --git a/app/api_user.py b/app/api_user.py
+index 52e5cd8..3d79cdf 100644
+--- a/app/api_user.py
++++ b/app/api_user.py
+@@ -8,7 +8,7 @@ from pydantic import BaseModel
+ from sqlalchemy import desc, func, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from . import errors, growth, receipts, settings_store
++from . import errors, growth, payments, receipts, settings_store
+ from .billing import sale_prices, to_nano, usd
+ from .db import get_session
+ from .models import ApiKey, Model, Payment, Referral, RequestLog, Transaction, User, now
+@@ -42,6 +42,7 @@ async def public_config(session: AsyncSession = Depends(get_session)):
+             "support_contact": g["support_contact"], "oauth": await enabled_providers(session),
+             "status_page": g.get("status_page", True),
+             "topup_bonus": growth.parse_tiers(b.get("topup_bonus", "")), "usd_rub_rate": b["usd_rub_rate"],
++            "pay_methods": [{"id": m["id"], "currency": m["currency"], "min": m["min"]} for m in await payments.methods(session)],
+             "referral": {"enabled": rf["enabled"], "friend_bonus": rf["friend_bonus_usd"],
+                          "inviter_bonus": rf["inviter_bonus_usd"], "require_topup": rf["require_topup"]}}
+ 
+diff --git a/app/main.py b/app/main.py
+index 353a578..aba1705 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,18 +1,21 @@
+ import asyncio
++import html
+ import logging
+ import pathlib
+ from contextlib import asynccontextmanager
++from urllib.parse import urlsplit
+ 
+-from fastapi import FastAPI, Request
++from fastapi import Depends, FastAPI, Request
+ from fastapi.exceptions import RequestValidationError
+-from fastapi.responses import FileResponse, JSONResponse
++from fastapi.responses import HTMLResponse, JSONResponse
+ from fastapi.staticfiles import StaticFiles
+ from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from . import api_admin, api_user, oauth, payments, proxy, status, support
+-from .config import ADMIN_EMAIL, ADMIN_PASSWORD
+-from .db import Base, SessionLocal, engine
+-from .models import Provider, User
++from . import api_admin, api_user, oauth, payments, proxy, settings_store, status, support
++from .config import ADMIN_EMAIL, ADMIN_PASSWORD, PUBLIC_URL
++from .db import Base, SessionLocal, engine, get_session
++from .models import Provider, User, now
+ from .security import hash_password
+ 
+ log = logging.getLogger("gateway")
+@@ -112,16 +115,27 @@ async def health():
+ app.mount("/static", StaticFiles(directory=STATIC), name="static")
+ 
+ 
++async def page(name: str, session: AsyncSession) -> HTMLResponse:
++    """HTML page with {{SITE_NAME}}, {{DOMAIN}}, {{PUBLIC_URL}}, {{YEAR}} filled from settings, so the tab title,
++    link previews and legal texts carry the same brand as the site itself."""
++    site = (await settings_store.get(session, "general")).get("site_name") or "AI Gateway"
++    subs = {"SITE_NAME": site, "DOMAIN": urlsplit(PUBLIC_URL).netloc, "PUBLIC_URL": PUBLIC_URL, "YEAR": str(now().year)}
++    text = (STATIC / name).read_text(encoding="utf-8")
++    for k, v in subs.items():
++        text = text.replace("{{%s}}" % k, html.escape(v))
++    return HTMLResponse(text)
++
++
+ @app.get("/")
+-async def index():
+-    return FileResponse(STATIC / "index.html")
++async def index(session: AsyncSession = Depends(get_session)):
++    return await page("index.html", session)
+ 
+ 
+ @app.get("/privacy")
+-async def privacy_page():
+-    return FileResponse(STATIC / "privacy.html")
++async def privacy_page(session: AsyncSession = Depends(get_session)):
++    return await page("privacy.html", session)
+ 
+ 
+ @app.get("/terms")
+-async def terms_page():
+-    return FileResponse(STATIC / "terms.html")
++async def terms_page(session: AsyncSession = Depends(get_session)):
++    return await page("terms.html", session)
+diff --git a/static/i18n.js b/static/i18n.js
+index 1fefa8f..2201386 100644
+--- a/static/i18n.js
++++ b/static/i18n.js
+@@ -922,6 +922,14 @@
+ "Документы": "Documents",
+ "Генерация": "Generation",
+ "Дешевле всех:": "Cheapest:",
++"Бонусы к пополнению": "Top-up bonuses",
++"Пополнение от": "Top-up from",
++"Процент считается от суммы одного платежа и зачисляется на баланс вместе с ним.": "The percentage applies to a single payment and is credited together with it.",
++"Пригласите друга": "Invite a friend",
++"Чат в личном кабинете": "Chat in your dashboard",
++"Вход временно недоступен, попробуйте позже.": "Sign-in is temporarily unavailable, please try again later.",
++"Часть моделей работает с перебоями": "Some models are having issues",
++"Большая часть моделей недоступна": "Most models are unavailable",
+ };
+   const CYR = /[А-Яа-яЁё]/;
+   const SKIP = 'script,style,textarea,input,pre,code,.code,.term,.tk-b,.msg,.att-n,.keybox,[data-noi18n]';
+diff --git a/static/index.html b/static/index.html
+index 8b6d73f..2061318 100644
+--- a/static/index.html
++++ b/static/index.html
+@@ -3,26 +3,27 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+-<title>NeuroGate — API для GPT, Claude, Gemini и DeepSeek</title>
++<title>{{SITE_NAME}} — API для GPT, Claude, Gemini и DeepSeek</title>
+ <meta name="description" content="OpenAI-совместимый API ко всем популярным языковым моделям. Один ключ, оплата по фактическим токенам через СБП, карту или криптовалюту.">
+ <meta name="theme-color" content="#FAF9F6">
+-<meta property="og:title" content="NeuroGate — API для GPT, Claude, Gemini и DeepSeek">
++<meta property="og:title" content="{{SITE_NAME}} — API для GPT, Claude, Gemini и DeepSeek">
++<meta property="og:site_name" content="{{SITE_NAME}}">
+ <meta property="og:description" content="Один OpenAI-совместимый ключ ко всем моделям. Оплата по токенам, без подписки.">
+ <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+-<link rel="stylesheet" href="/static/style.css?v=18">
+-<link rel="stylesheet" href="/static/fx.css?v=18">
+-<link rel="stylesheet" href="/static/landing.css?v=18">
++<link rel="stylesheet" href="/static/style.css?v=19">
++<link rel="stylesheet" href="/static/fx.css?v=19">
++<link rel="stylesheet" href="/static/landing.css?v=19">
+ <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light'</script>
+ </head>
+ <body>
+ <div id="app"></div>
+ <div id="toasts"></div>
+-<script src="/static/i18n.js?v=18"></script>
+-<script src="/static/brands.js?v=18"></script>
+-<script src="/static/app.js?v=18"></script>
+-<script src="/static/landing.js?v=18"></script>
+-<script src="/static/fx.js?v=18"></script>
++<script src="/static/i18n.js?v=19"></script>
++<script src="/static/brands.js?v=19"></script>
++<script src="/static/app.js?v=19"></script>
++<script src="/static/landing.js?v=19"></script>
++<script src="/static/fx.js?v=19"></script>
+ </body>
+ </html>
+diff --git a/static/landing.css b/static/landing.css
+index 4935cd1..68febce 100644
+--- a/static/landing.css
++++ b/static/landing.css
+@@ -106,19 +106,20 @@
+ .lp-rows{margin:0;display:flex;flex-direction:column}
+ .lp-rows>div{display:grid;grid-template-columns:120px 1fr;gap:16px;padding:14px 0;border-top:1px solid var(--bd)}
+ .lp-rows dt{font-weight:500}.lp-rows dd{margin:0;color:var(--tx2);line-height:1.55}
+-.lp-calc{border:1px solid var(--bd);border-radius:var(--r-md);background:var(--s1);padding:20px 22px}
+-.lp-calc-h{font-weight:600;margin-bottom:14px}.lp-calc-h .mono{font-weight:500}
+-.lp-calc-t td{padding:9px 0;border-bottom:1px solid var(--bd);white-space:normal}
+-.lp-calc-t td.r{padding-left:16px}
+-.lp-calc-t tr.tot td{font-weight:600;border-bottom:0;padding-top:12px}
+-.lp-calc-t tbody tr:hover{background:none}
+-.lp-calc p{margin:14px 0 0}
++.lp-card{border:1px solid var(--bd);border-radius:var(--r-md);background:var(--s1);padding:20px 22px}
++.lp-card-h{font-weight:600;margin-bottom:6px}
++.lp-card-t td{padding:9px 0;border-bottom:1px solid var(--bd);white-space:normal}
++.lp-card-t td.r{padding-left:16px}
++.lp-card-t tbody tr:hover{background:none}
++.lp-card p{margin:12px 0 0}
++.lp-perk+.lp-perk{margin-top:18px;padding-top:18px;border-top:1px solid var(--bd)}
++.lp-ref{display:flex;gap:12px;align-items:flex-start}.lp-ref>svg{width:18px;height:18px;flex:none;margin-top:2px;color:var(--link)}.lp-ref p{margin:4px 0 0;line-height:1.55}
++.lp-card-f{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid var(--bd)}
+ 
+ /* status */
+-.lp-st-sum{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+-.lp-st td{padding:10px 14px}
+-.lp-st-bh{width:260px}
+-.lp-bars{gap:2px}.lp-bars i{height:14px;border-radius:1px}.lp-bars i.st-ok{opacity:.55}
++.lp-st-card{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,340px);gap:12px 16px;align-items:center;border:1px solid var(--bd);border-radius:var(--r-md);background:var(--s1);padding:16px 20px}
++.lp-st-card b{font-weight:600}
++.lp-bars{gap:2px}.lp-bars i{height:24px;border-radius:2px}.lp-bars i.st-ok{opacity:.55}
+ 
+ /* faq */
+ .lp-faq{display:grid;grid-template-columns:1fr 1fr;gap:0 56px;margin:0}
+@@ -134,10 +135,11 @@
+ .lp-foot-h{font-size:12.5px;color:var(--tx3);margin-bottom:2px}
+ .lp-foot-c{margin-top:36px;padding-top:18px;border-top:1px solid var(--bd)}
+ 
+-@media(max-width:960px){.lp-hero-in,.lp-split{grid-template-columns:1fr;gap:36px}.lp-nav{display:none}.lp-st-bh{display:none}}
++@media(max-width:960px){.lp-hero-in,.lp-split{grid-template-columns:1fr;gap:36px}.lp-nav{display:none}}
+ @media(max-width:640px){.lp-w{padding:0 20px}.lp-h1{font-size:32px}.lp-lead{font-size:16px}.lp-hero{padding:44px 0}.lp-sec{padding:52px 0}
+   .lp-faq{grid-template-columns:1fr}.lp-foot-in{grid-template-columns:1fr 1fr}.lp-foot-b{grid-column:1/-1}.lp-rows>div{grid-template-columns:1fr;gap:4px}
+   .lp-facts{flex-direction:column}.lp-facts>div+div{border-left:0;padding-left:0}.lp-pr-bar .inp{max-width:none}
+   .lp-vol{padding:16px}.lp-vol-v{font-size:26px}.lp-ticks .opt{display:none}.lp-vol-best .btn{margin-left:0}
++  .lp-st-card{grid-template-columns:auto minmax(0,1fr);padding:14px 16px}.lp-st-card .lp-bars{grid-column:1/-1}
+   .lp-vol-mix,.lp-vol-mix .pills{display:flex;width:100%}.lp-vol-mix .pills button{flex:1;display:flex;flex-direction:column;align-items:center;padding:5px 4px;line-height:1.35}.lp-vol-mix .pills button span{margin:0}}
+ .lp-mrow{display:flex;align-items:center;gap:12px}.lp-mrow .plogo.sm{width:28px;height:28px}.lp-mrow .plogo.sm svg{width:16px;height:16px}
+diff --git a/static/landing.js b/static/landing.js
+index b5a107d..dcf982f 100644
+--- a/static/landing.js
++++ b/static/landing.js
+@@ -9,7 +9,7 @@ const LP_MIX = [['Чат-бот', 3, 1], ['Документы', 10, 1], ['Ген
+ 
+ function landingPage(el, p, q, { login = false } = {}) {
+   LP.vol = LP.vol || 1e7; LP.mix = LP.mix || 0; // kept across language re-renders
+-  const cfg = S.cfg, stOn = cfg.status_page !== false, host = location.origin;
++  const cfg = S.cfg, stOn = cfg.status_page !== false, host = location.origin, perks = lpPerks(cfg);
+   const nav = [['prices', 'Цены'], ['connect', 'Подключение'], ['pay', 'Оплата']].concat(stOn ? [['status', 'Статус']] : [], [['faq', 'Вопросы']]);
+   const brand = `<a class="brand lp-brand" href="#/" data-go="top"><div class="logo">${LOGO}</div><span>${esc(cfg.site_name)}</span></a>`;
+   el.innerHTML = `<div class="lp" id="lp">
+@@ -48,7 +48,7 @@ function landingPage(el, p, q, { login = false } = {}) {
+     <div class="lp-code" data-noi18n>${lpCode(host)}</div>
+   </div></section>
+ 
+-  <section class="lp-sec" data-sec="pay"><div class="lp-w lp-split">
++  <section class="lp-sec" data-sec="pay"><div class="lp-w${perks ? ' lp-split' : ''}">
+     <div>
+       <div class="lp-sh"><h2>Оплата</h2></div>
+       <dl class="lp-rows">
+@@ -57,7 +57,7 @@ function landingPage(el, p, q, { login = false } = {}) {
+         <div><dt>Контроль</dt><dd>Лимит трат на каждый ключ, история запросов и расходы по дням в кабинете.</dd></div>
+       </dl>
+     </div>
+-    <div class="lp-calc" id="lpCalc">${lpCalc(null)}</div>
++    ${perks}
+   </div></section>
+ 
+   ${stOn ? `<section class="lp-sec" data-sec="status"><div class="lp-w">
+@@ -80,7 +80,7 @@ function landingPage(el, p, q, { login = false } = {}) {
+     <div class="lp-foot-b">${brand}<p class="small muted">OpenAI-совместимый доступ к языковым моделям с оплатой по токенам.</p></div>
+     <div><div class="lp-foot-h">Сервис</div><a href="#/" data-go="prices">Цены</a><a href="#/" data-go="connect">Подключение</a>${stOn ? '<a href="#/status">Статус</a>' : ''}<a href="#/" data-login>Войти</a></div>
+     <div><div class="lp-foot-h">Документы</div><a href="/privacy">Политика конфиденциальности</a><a href="/terms">Пользовательское соглашение</a></div>
+-    <div><div class="lp-foot-h">Поддержка</div>${cfg.support_contact ? `<span data-noi18n>${esc(cfg.support_contact)}</span>` : '<span class="dim">Контакт появится здесь</span>'}<a href="#/" data-go="faq">Вопросы и ответы</a></div>
++    <div><div class="lp-foot-h">Поддержка</div>${cfg.support_contact ? `<span data-noi18n>${esc(cfg.support_contact)}</span>` : ''}<a href="#/" data-login>Чат в личном кабинете</a><a href="#/" data-go="faq">Вопросы и ответы</a></div>
+   </div><div class="lp-w"><div class="lp-foot-c small dim">© ${new Date().getFullYear()} ${esc(cfg.site_name)}</div></div></footer></div>`;
+ 
+   const root = $('#lp');
+@@ -120,13 +120,12 @@ async function lpLoadModels(host) {
+   const ex = LP.models.length ? lpPick(LP.models) : null;
+   $('#lpFacts').innerHTML = lpFacts(LP.models);
+   $('.lp-hero-r').innerHTML = lpReq(host, ex);
+-  $('#lpCalc').innerHTML = lpCalc(ex);
+   lpPrices(); lpVolUpd();
+ }
+ function lpFacts(ms) {
+   const items = [];
+   if (ms && ms.length) {
+-    const priced = ms.filter(m => m.price_in > 0);
++    const priced = ms.filter(m => m.price_in > 0 && m.kind !== 'embedding' && m.kind !== 'image'); // the cheapest embedding is not a fair «from»
+     items.push(['Моделей в каталоге', nf(ms.length)]);
+     if (priced.length) items.push(['Вход, от', `${lpUsd(Math.min(...priced.map(m => m.price_in)))} / 1M`]);
+   } else items.push(['Моделей в каталоге', '—']);
+@@ -232,17 +231,24 @@ function lpVolUpd() {
+   $$('#lpPr [data-ci]').forEach(td => { td.lastElementChild.textContent = lpSum(lpCost(LP.rows[+td.dataset.ci])); });
+ }
+ 
+-// ---------- worked billing example
+-function lpCalc(m) {
+-  if (!m || !m.price_in) return `<div class="lp-calc-h">Пример расчёта</div><p class="muted small">Появится, когда в каталоге будут модели с ценами.</p>`;
+-  const a = LP_EX.pin * m.price_in / 1e6, b = LP_EX.pout * m.price_out / 1e6;
+-  return `<div class="lp-calc-h">Пример расчёта: <span class="mono" data-noi18n>${esc(m.id)}</span></div>
+-    <table class="lp-calc-t"><tbody>
+-      <tr><td>Входные токены</td><td class="r num">${nf(LP_EX.pin)} × ${lpUsd(m.price_in)} / 1M</td><td class="r num">${lpUsd(a)}</td></tr>
+-      <tr><td>Выходные токены</td><td class="r num">${nf(LP_EX.pout)} × ${lpUsd(m.price_out)} / 1M</td><td class="r num">${lpUsd(b)}</td></tr>
+-      <tr class="tot"><td>Итого за запрос</td><td></td><td class="r num">${lpUsd(a + b)}</td></tr>
+-    </tbody></table>
+-    <p class="small muted">Это та же сумма, которую вы увидите в истории запросов.</p>`;
++// ---------- payment perks: top-up bonus tiers, referral reward and minimum top-up, all from the public config
++function lpPerks(cfg) {
++  const en = I18N.lang === 'en', tiers = cfg.topup_bonus || [], rf = cfg.referral || {}, pm = cfg.pay_methods || [];
++  const fb = rf.enabled ? +rf.friend_bonus || 0 : 0, ib = rf.enabled ? +rf.inviter_bonus || 0 : 0, out = [];
++  if (tiers.length) out.push(`<div class="lp-perk"><div class="lp-card-h">Бонусы к пополнению</div>
++    <table class="lp-card-t"><tbody>${tiers.map(([a, p]) => `<tr><td>Пополнение от <b class="num" data-noi18n>${lpUsd(a)}</b></td><td class="r"><span class="badge ok num" data-noi18n>+${p.toLocaleString(I18N.locale())}%</span></td></tr>`).join('')}</tbody></table>
++    <p class="small muted">Процент считается от суммы одного платежа и зачисляется на баланс вместе с ним.</p></div>`);
++  if (fb || ib) {
++    const F = lpUsd(fb), I = lpUsd(ib), when = rf.require_topup ? (en ? 'after their first top-up' : 'после его первого пополнения') : (en ? 'right after they sign up' : 'сразу после его регистрации');
++    const t = fb && ib ? (en ? `Your friend gets ${F} on sign-up via your link, and you get ${I} ${when}.` : `Друг получит ${F} при регистрации по вашей ссылке, а вы — ${I} ${when}.`)
++      : fb ? (en ? `Your friend gets ${F} on sign-up via your link.` : `Друг получит ${F} при регистрации по вашей ссылке.`)
++      : en ? `You get ${I} for every friend who signs up via your link${rf.require_topup ? ' and tops up' : ''}.` : `Вы получите ${I} за каждого друга, который зарегистрируется по вашей ссылке${rf.require_topup ? ' и пополнит баланс' : ''}.`;
++    out.push(`<div class="lp-perk lp-ref">${ic('gift')}<div><b>Пригласите друга</b><p class="muted" data-noi18n>${t} ${en ? 'The link is in your dashboard.' : 'Ссылка — в личном кабинете.'}</p></div></div>`);
++  }
++  const rub = pm.find(m => m.currency === 'RUB'), usd = pm.find(m => m.currency === 'USD');
++  const min = [rub && `${nf(rub.min)} ₽`, usd && `$${nf(usd.min)} ${en ? 'in crypto' : 'в криптовалюте'}`].filter(Boolean).join(', ');
++  if (!out.length && !min) return '';
++  return `<div class="lp-card">${out.join('')}<div class="lp-card-f"><span class="muted small" data-noi18n>${min ? (en ? 'Minimum top-up: ' : 'Минимальное пополнение — ') + min : ''}</span><button class="btn pri" data-login>Получить ключ</button></div></div>`;
+ }
+ 
+ // ---------- code diff with tabs
+@@ -268,24 +274,29 @@ function lpTabs(box) {
+ }
+ 
+ // ---------- model status (compact table)
+-const lpStatusSkel = () => `<div class="tbl-wrap"><table><tbody>${'<tr><td colspan="4"><div class="skel" style="height:16px"></div></td></tr>'.repeat(4)}</tbody></table></div>`;
++const lpStatusSkel = () => `<div class="lp-st-card"><div class="skel" style="height:40px;grid-column:1/-1"></div></div>`;
+ async function lpStatus() {
+   const box = $('#lpSt'); if (!box) return;
+   let d; try { d = await api('/api/public/status'); } catch { if (box.isConnected) { box.closest('[data-sec]').remove(); $('.lp-nav [data-go=status]')?.remove(); } return; }
+   if (!box.isConnected) return;
+-  const k = ST[d.overall][1], ban = { ok: 'Все модели работают', degraded: 'Некоторые модели работают нестабильно', down: 'Часть моделей сейчас недоступна' }[d.overall];
+-  const hh = iso => new Date(iso).toLocaleTimeString(I18N.locale(), { hour: '2-digit', minute: '2-digit' });
+-  const ms = d.models, MAX = 8, pct = v => v == null ? '—' : String(v).replace('.', I18N.lang === 'ru' ? ',' : '.') + '%';
+-  box.innerHTML = `<div class="lp-st-sum"><span class="st-dot st-${k}"></span><b>${ban}</b><span class="dim small">${I18N.t('обновлено')} ${hh(d.updated_at)}</span></div>
+-    ${ms.length ? `<div class="tbl-wrap"><table class="lp-st"><thead><tr><th>Модель</th><th>Состояние</th><th class="r">Доступность</th><th class="r">Задержка</th><th class="lp-st-bh">24 часа</th></tr></thead><tbody>
+-      ${ms.slice(0, MAX).map(m => `<tr><td class="mono" data-noi18n>${esc(m.id)}</td><td><span class="st-t st-${ST[m.status][1]}">${ST[m.status][0]}</span></td><td class="r num">${pct(m.uptime)}</td><td class="r num">${lpLat(m.latency_ms)}</td>
+-        <td class="lp-st-bh"><div class="st-bars lp-bars">${m.hours.map(b => `<i class="st-${ST[b.level][1]}"></i>`).join('')}</div></td></tr>`).join('')}
+-    </tbody></table></div>${ms.length > MAX ? `<p class="mt"><a href="#/status" class="lp-more">Все модели на странице статуса</a> <span class="dim small">(${ms.length})</span></p>` : ''}` : '<div class="lp-empty">Моделей пока нет</div>'}`;
+   if (!LP.stT) LP.stT = setInterval(() => { if (!$('#lpSt')) { clearInterval(LP.stT); LP.stT = 0; return; } lpStatus(); }, 60000);
++  const ms = d.models, total = ms.length, up = ms.filter(m => m.status === 'ok').length, en = I18N.lang === 'en';
++  if (!total) { box.innerHTML = '<div class="lp-empty">Моделей пока нет</div>'; return; }
++  // A summary, not a per-model table: one broken route should not paint the landing red. Details live on #/status.
++  const lvl = up === total ? 'ok' : up * 2 >= total ? 'degraded' : 'down';
++  const head = { ok: 'Все модели работают', degraded: 'Часть моделей работает с перебоями', down: 'Большая часть моделей недоступна' }[lvl];
++  const hh = iso => new Date(iso).toLocaleTimeString(I18N.locale(), { hour: '2-digit', minute: '2-digit' });
++  const pct = (n, e) => (Math.floor((1 - e / n) * 1e4) / 100).toLocaleString(I18N.locale(), { maximumFractionDigits: 2 }) + '%'; // floor: never round 99.996 up to 100
++  const lv = (n, e) => !n ? 'none' : e / n >= .5 ? 'down' : e / n >= .1 ? 'degraded' : 'ok'; // same thresholds as status._level
++  const hrs = ms[0].hours.map((h, i) => ms.reduce((a, m) => ({ t: h.hour, n: a.n + m.hours[i].requests, e: a.e + m.hours[i].errors }), { n: 0, e: 0 }));
++  const n = ms.reduce((a, m) => a + m.requests_24h, 0), e = ms.reduce((a, m) => a + m.errors_24h, 0);
++  const sub = [lvl !== 'ok' && (en ? `${up} of ${total} up` : `работают ${up} из ${total}`), n && (en ? `24 h availability ${pct(n, e)}` : `доступность за 24 часа ${pct(n, e)}`),
++    (en ? 'updated ' : 'обновлено ') + hh(d.updated_at)].filter(Boolean).join(' · ');
++  box.innerHTML = `<div class="lp-st-card"><span class="st-dot big st-${ST[lvl][1]}"></span>
++    <div><b>${head}</b><div class="small muted" data-noi18n>${sub[0].toUpperCase() + sub.slice(1)}</div></div>
++    <div class="st-bars lp-bars" data-noi18n>${hrs.map(h => `<i class="st-${ST[lv(h.n, h.e)][1]}" title="${hh(h.t)} · ${h.n ? pct(h.n, h.e) : en ? 'no requests' : 'нет запросов'}"></i>`).join('')}</div></div>`;
+ }
+ 
+-const lpLat = v => v == null ? '—' : v < 1000 ? v + ' ' + I18N.t('мс') : String((v / 1000).toFixed(1)).replace('.', I18N.lang === 'ru' ? ',' : '.') + (I18N.lang === 'en' ? ' s' : ' с');
+-
+ // ---------- helpers
+ function lpGo(id) {
+   const t = id === 'top' ? 0 : ($(`[data-sec="${id}"]`)?.getBoundingClientRect().top ?? 0) + scrollY - 60;
+@@ -298,7 +309,7 @@ function lpLogin(q) {
+     ${q.error ? `<div class="alert err small" style="margin-bottom:14px">${esc(q.error)}</div>` : ''}
+     ${localStorage.getItem('ref') && S.cfg.referral?.enabled && S.cfg.referral.friend_bonus > 0 ? `<div class="alert info ico small" style="margin-bottom:14px">${ic('gift')}<span>Вас пригласил друг: после регистрации на баланс придёт <b>${money(S.cfg.referral.friend_bonus, 2)}</b> на использование API.</span></div>` : ''}
+     ${any ? `<div class="col">${o.github ? `<a class="btn oauth" href="/api/auth/oauth/github/start">${GH_SVG}Продолжить с GitHub</a>` : ''}${o.google ? `<a class="btn oauth" href="/api/auth/oauth/google/start">${G_SVG}Продолжить с Google</a>` : ''}</div>`
+-      : `<div class="alert warn small">Вход ещё не настроен. Администратор: войдите по паролю и укажите ключи GitHub/Google в настройках.</div>`}
++      : `<div class="alert warn small">Вход временно недоступен, попробуйте позже.${S.cfg.support_contact ? ` Поддержка: <span data-noi18n>${esc(S.cfg.support_contact)}</span>` : ''}</div>`}
+     <p class="small dim" style="margin:20px 0 0">Продолжая, вы принимаете условия использования сервиса.</p>`, { size: 'auth-m' });
+   if (/^#\/(login|register)/.test(location.hash)) history.replaceState(null, '', location.pathname + '#/');
+ }
+diff --git a/static/privacy.html b/static/privacy.html
+index 8786e69..3cedbaf 100644
+--- a/static/privacy.html
++++ b/static/privacy.html
+@@ -3,8 +3,8 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+-<title>Политика конфиденциальности — TRUE</title>
+-<meta name="description" content="Политика конфиденциальности сервиса TRUE (myapi.buzz)">
++<title>Политика конфиденциальности — {{SITE_NAME}}</title>
++<meta name="description" content="Политика конфиденциальности сервиса {{SITE_NAME}} ({{DOMAIN}})">
+ <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+@@ -34,7 +34,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <body>
+ <div class="wrap">
+ <header class="top">
+-  <a class="brand" href="/">TRUE</a>
++  <a class="brand" href="/">{{SITE_NAME}}</a>
+   <a href="/privacy" style="font-size:13px">Политика</a>
+   <a href="/terms" style="font-size:13px">Соглашение</a>
+ </header>
+@@ -42,7 +42,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <h1>Политика конфиденциальности</h1>
+ <div class="date">Актуальная редакция от 23.10.2026</div>
+ 
+-<p>Настоящая Политика конфиденциальности (далее — «Политика») регулирует порядок обработки и защиты информации, которую Пользователь передаёт при использовании сервиса <strong>«TRUE»</strong> (адрес: <a href="https://myapi.buzz">https://myapi.buzz</a>, далее — «Сервис»). Собираются идентификаторы аккаунта, техническая информация и история взаимодействий. Данные используются для обеспечения работы сервиса, связи с пользователем и анализа. Передача информации третьим лицам возможна только в законодательно установленных случаях или с согласия пользователя. Хранение данных осуществляется в течение необходимого срока, их защита — в разумных пределах. Пользователь самостоятельно несёт ответственность за риски, связанные с передачей данных. Администрация вправе вносить изменения в Политику без уведомления — согласие считается принятым при дальнейшем использовании сервиса.</p>
++<p>Настоящая Политика конфиденциальности (далее — «Политика») регулирует порядок обработки и защиты информации, которую Пользователь передаёт при использовании сервиса <strong>«{{SITE_NAME}}»</strong> (адрес: <a href="{{PUBLIC_URL}}">{{PUBLIC_URL}}</a>, далее — «Сервис»). Собираются идентификаторы аккаунта, техническая информация и история взаимодействий. Данные используются для обеспечения работы сервиса, связи с пользователем и анализа. Передача информации третьим лицам возможна только в законодательно установленных случаях или с согласия пользователя. Хранение данных осуществляется в течение необходимого срока, их защита — в разумных пределах. Пользователь самостоятельно несёт ответственность за риски, связанные с передачей данных. Администрация вправе вносить изменения в Политику без уведомления — согласие считается принятым при дальнейшем использовании сервиса.</p>
+ 
+ <h2>1. Общие положения</h2>
+ <p>1.1. Настоящая Политика регулирует порядок обработки и защиты информации, которую Пользователь передаёт при использовании Сервиса.</p>
+@@ -86,7 +86,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <h2>7. Изменения в Политике</h2>
+ <p>7.1. Администрация вправе изменять условия Политики без предварительного уведомления.</p>
+ <p>7.2. Продолжение использования Сервиса после внесения изменений означает согласие Пользователя с новой редакцией Политики.</p>
+-<p>7.3. Актуальная версия Политики публикуется по адресу: <a href="https://myapi.buzz/privacy">https://myapi.buzz/privacy</a>.</p>
++<p>7.3. Актуальная версия Политики публикуется по адресу: <a href="{{PUBLIC_URL}}/privacy">{{PUBLIC_URL}}/privacy</a>.</p>
+ 
+ <h2>8. Контактная информация</h2>
+ <p>По вопросам обработки персональных данных Пользователь может обратиться в службу поддержки Сервиса:</p>
+@@ -97,7 +97,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ </ul>
+ </main>
+ <footer>
+-  <div>© 2026 TRUE (myapi.buzz)</div>
++  <div>© {{YEAR}} {{SITE_NAME}} ({{DOMAIN}})</div>
+   <div>Telegram: <a href="https://t.me/royesee">@royesee</a> · <a href="mailto:tgfrixhack@gmail.com">tgfrixhack@gmail.com</a></div>
+ </footer>
+ </div>
+diff --git a/static/terms.html b/static/terms.html
+index b85165b..a758a2e 100644
+--- a/static/terms.html
++++ b/static/terms.html
+@@ -3,8 +3,8 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+-<title>Пользовательское соглашение — TRUE</title>
+-<meta name="description" content="Пользовательское соглашение сервиса TRUE (myapi.buzz)">
++<title>Пользовательское соглашение — {{SITE_NAME}}</title>
++<meta name="description" content="Пользовательское соглашение сервиса {{SITE_NAME}} ({{DOMAIN}})">
+ <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+@@ -35,7 +35,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <body>
+ <div class="wrap">
+ <header class="top">
+-  <a class="brand" href="/">TRUE</a>
++  <a class="brand" href="/">{{SITE_NAME}}</a>
+   <a href="/privacy" style="font-size:13px">Политика</a>
+   <a href="/terms" style="font-size:13px">Соглашение</a>
+ </header>
+@@ -44,7 +44,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <div class="date">Актуальная редакция от 23.10.2026</div>
+ 
+ <h2>1. Общие положения</h2>
+-<p>1.1. Настоящее Пользовательское соглашение (далее — <strong>«Соглашение»</strong>) регулирует порядок использования онлайн-сервиса <strong>«TRUE»</strong> (адрес: <a href="https://myapi.buzz">https://myapi.buzz</a>, далее — <strong>«Сервис»</strong>), предоставляемого Администрацией.</p>
++<p>1.1. Настоящее Пользовательское соглашение (далее — <strong>«Соглашение»</strong>) регулирует порядок использования онлайн-сервиса <strong>«{{SITE_NAME}}»</strong> (адрес: <a href="{{PUBLIC_URL}}">{{PUBLIC_URL}}</a>, далее — <strong>«Сервис»</strong>), предоставляемого Администрацией.</p>
+ <p>1.2. Используя Сервис, включая регистрацию, оплату услуг или получение доступа к материалам, Пользователь подтверждает, что полностью ознакомился с условиями настоящего Соглашения и принимает их в полном объёме.</p>
+ <p>1.3. В случае несогласия с условиями Соглашения Пользователь обязан прекратить использование Сервиса.</p>
+ 
+@@ -114,7 +114,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ 
+ <h2>9. Изменение условий</h2>
+ <p>9.1. Администрация вправе вносить изменения в настоящее Соглашение.</p>
+-<p>9.2. Актуальная версия Соглашения публикуется в Сервисе по адресу: <a href="https://myapi.buzz/terms">https://myapi.buzz/terms</a>.</p>
++<p>9.2. Актуальная версия Соглашения публикуется в Сервисе по адресу: <a href="{{PUBLIC_URL}}/terms">{{PUBLIC_URL}}/terms</a>.</p>
+ <p>9.3. Продолжение использования Сервиса означает согласие Пользователя с обновлёнными условиями.</p>
+ 
+ <h2>10. Контактная информация</h2>
+@@ -128,7 +128,7 @@ footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;padding
+ <div class="final">Используя Сервис (в том числе регистрируясь в нём и/или оплачивая услуги), Пользователь подтверждает, что ознакомлен с настоящим Соглашением и принимает его условия в полном объёме.</div>
+ </main>
+ <footer>
+-  <div>© 2026 TRUE (myapi.buzz)</div>
++  <div>© {{YEAR}} {{SITE_NAME}} ({{DOMAIN}})</div>
+   <div>Telegram: <a href="https://t.me/royesee">@royesee</a> · <a href="mailto:tgfrixhack@gmail.com">tgfrixhack@gmail.com</a></div>
+ </footer>
+ </div>
