@@ -1,0 +1,1597 @@
+diff --git a/README.md b/README.md
+index 019edd4..9c62e5f 100644
+--- a/README.md
++++ b/README.md
+@@ -75,7 +75,9 @@ client = OpenAI(base_url="https://ваш-домен/v1", api_key="sk-gw-...")
+ print(client.chat.completions.create(model="claude-sonnet-4", messages=[{"role":"user","content":"Hi"}]).choices[0].message.content)
+ ```
+ 
+-Эндпоинты: `/v1/chat/completions` (в т.ч. stream), `/v1/messages` (Anthropic-формат), `/v1/embeddings`, `/v1/models`, `/v1/balance`. Swagger: `/api/docs`.
++Эндпоинты: `/v1/chat/completions` (в т.ч. stream), `/v1/responses` (Responses API — нужен Codex CLI), `/v1/messages` и `/v1/messages/count_tokens` (Anthropic-формат — Claude Code), `/v1/embeddings`, `/v1/models`, `/v1/balance`.
++
++Claude Code и Codex CLI: готовые настройки — в кабинете, раздел «Документация». Для моделей не от OpenAI шлюз переводит Responses API в их формат; заголовки `anthropic-beta`/`anthropic-version` уходят провайдеру Anthropic как есть. Кеш промптов тарифицируется отдельно: по умолчанию чтение — 10% цены входа у Anthropic и 50% у остальных, запись — 125% у Anthropic; доли можно задать для каждой модели. Swagger: `/api/docs`.
+ 
+ ## 6. Важно
+ - Перепродажа доступа к API может противоречить условиям OpenAI/Anthropic и др. — проверьте условия провайдеров (или используйте агрегаторы/провайдеров, разрешающих реселлинг).
+@@ -89,6 +91,7 @@ print(client.chat.completions.create(model="claude-sonnet-4", messages=[{"role":
+ uvicorn tests.mock_upstream:app --port 9001 &   # фейковые провайдеры
+ ALLOW_PASSWORD_SIGNUP=1 DATA_DIR=./data_test ALLOW_PRIVATE_PROVIDER_URLS=1 ADMIN_EMAIL=admin@test.io ADMIN_PASSWORD=adminpass123 uvicorn app.main:app --port 8000 &
+ python tests/e2e.py
++PYTHONPATH=. python tests/agents_test.py   # Claude Code / Codex: заголовки, кеш, /v1/responses
+ PYTHONPATH=. python tests/oauth_test.py
+ ```
+ 
+diff --git a/app/adapters.py b/app/adapters.py
+index c671a5f..5632c96 100644
+--- a/app/adapters.py
++++ b/app/adapters.py
+@@ -2,6 +2,7 @@
+ import json
+ import time
+ import uuid
++from dataclasses import dataclass
+ 
+ STOP_MAP = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length",
+             "tool_use": "tool_calls", "pause_turn": "stop", "refusal": "content_filter"}
+@@ -99,11 +100,42 @@ def openai_to_anthropic(body: dict, upstream_model: str, default_max: int = 4096
+     return out
+ 
+ 
+-def anthropic_usage(u: dict | None) -> tuple[int, int]:
++@dataclass
++class Usage:
++    """Token counts of one request. tin includes the cached part; cache_* tell how much of it was cached."""
++    tin: int = 0
++    tout: int = 0
++    cache_read: int = 0
++    cache_write: int = 0     # written to the cache with the default 5-minute lifetime
++    cache_write_1h: int = 0  # written with the 1-hour lifetime (Anthropic), priced higher
++
++
++def anthropic_usage_of(u: dict | None) -> Usage:
++    """Anthropic reports cached input apart from input_tokens."""
+     u = u or {}
+-    pin = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + \
+-          (u.get("cache_creation_input_tokens") or 0)
+-    return pin, u.get("output_tokens") or 0
++    cr, cw = u.get("cache_read_input_tokens") or 0, u.get("cache_creation_input_tokens") or 0
++    cc = u.get("cache_creation")
++    w1h = min(cw, (cc.get("ephemeral_1h_input_tokens") or 0) if isinstance(cc, dict) else 0)
++    return Usage((u.get("input_tokens") or 0) + cr + cw, u.get("output_tokens") or 0, cr, cw - w1h, w1h)
++
++
++def openai_usage_of(u: dict | None) -> Usage:
++    """Chat Completions or Responses usage; cached tokens are already counted in the input."""
++    u = u or {}
++    tin = u.get("prompt_tokens") or u.get("input_tokens") or 0
++    det = u.get("prompt_tokens_details") or u.get("input_tokens_details")
++    cached = (det.get("cached_tokens") if isinstance(det, dict) else 0) or u.get("prompt_cache_hit_tokens") or 0  # DeepSeek
++    return Usage(tin, u.get("completion_tokens") or u.get("output_tokens") or 0, min(cached, tin))
++
++
++def chat_usage(u: Usage) -> dict:
++    return {"prompt_tokens": u.tin, "completion_tokens": u.tout, "total_tokens": u.tin + u.tout,
++            "prompt_tokens_details": {"cached_tokens": u.cache_read}}
++
++
++def anthropic_usage(u: dict | None) -> tuple[int, int]:
++    x = anthropic_usage_of(u)
++    return x.tin, x.tout
+ 
+ 
+ def anthropic_to_openai(data: dict, public_model: str) -> dict:
+@@ -118,12 +150,11 @@ def anthropic_to_openai(data: dict, public_model: str) -> dict:
+     msg = {"role": "assistant", "content": "".join(text) if text or not tool_calls else None}
+     if tool_calls:
+         msg["tool_calls"] = tool_calls
+-    pin, pout = anthropic_usage(data.get("usage"))
+     return {"id": "chatcmpl-" + (data.get("id") or uuid.uuid4().hex), "object": "chat.completion",
+             "created": int(time.time()), "model": public_model,
+             "choices": [{"index": 0, "message": msg,
+                          "finish_reason": STOP_MAP.get(data.get("stop_reason"), "stop")}],
+-            "usage": {"prompt_tokens": pin, "completion_tokens": pout, "total_tokens": pin + pout}}
++            "usage": chat_usage(anthropic_usage_of(data.get("usage")))}
+ 
+ 
+ class AnthropicStreamToOpenAI:
+@@ -136,6 +167,7 @@ class AnthropicStreamToOpenAI:
+         self.include_usage = include_usage
+         self.prompt_tokens = 0
+         self.completion_tokens = 0
++        self.in_usage = {}  # input part of Anthropic usage: message_start, updated by message_delta
+         self.text_chars = 0
+         self.tool_index = {}  # anthropic block index -> openai tool index
+         self.finish = None
+@@ -149,8 +181,8 @@ class AnthropicStreamToOpenAI:
+         t = ev.get("type")
+         out = []
+         if t == "message_start":
+-            pin, pout = anthropic_usage(ev.get("message", {}).get("usage"))
+-            self.prompt_tokens, self.completion_tokens = pin, pout
++            self.in_usage = dict(ev.get("message", {}).get("usage") or {})
++            self.prompt_tokens, self.completion_tokens = anthropic_usage(self.in_usage)
+             out.append(self._chunk({"role": "assistant", "content": ""}))
+         elif t == "content_block_start":
+             cb = ev.get("content_block", {})
+@@ -173,17 +205,18 @@ class AnthropicStreamToOpenAI:
+             u = ev.get("usage") or {}
+             if u.get("output_tokens") is not None:
+                 self.completion_tokens = u["output_tokens"]
+-            if u.get("input_tokens"):
+-                self.prompt_tokens = anthropic_usage(u)[0]
++            inp = {k: u[k] for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
++                                     "cache_creation") if u.get(k) is not None}
++            if inp:  # message_delta usage is cumulative
++                self.in_usage.update(inp)
++                self.prompt_tokens = anthropic_usage(self.in_usage)[0]
+             self.finish = STOP_MAP.get((ev.get("delta") or {}).get("stop_reason"), "stop")
+         elif t == "message_stop":
+             out.append(self._chunk({}, self.finish or "stop"))
+             if self.include_usage:
+                 out.append({"id": self.id, "object": "chat.completion.chunk", "created": self.created,
+                             "model": self.model, "choices": [],
+-                            "usage": {"prompt_tokens": self.prompt_tokens,
+-                                      "completion_tokens": self.completion_tokens,
+-                                      "total_tokens": self.prompt_tokens + self.completion_tokens}})
++                            "usage": chat_usage(self.usage)})
+             self.done = True
+         elif t == "error":
+             err = ev.get("error", {})
+@@ -191,5 +224,10 @@ class AnthropicStreamToOpenAI:
+         return out
+ 
+ 
++    @property
++    def usage(self) -> Usage:
++        return anthropic_usage_of({**self.in_usage, "output_tokens": self.completion_tokens})
++
++
+ def estimate_tokens(text: str) -> int:
+     return max(1, len(text) // 3) if text else 0
+diff --git a/app/api_admin.py b/app/api_admin.py
+index 9252a7f..216ff1e 100644
+--- a/app/api_admin.py
++++ b/app/api_admin.py
+@@ -4,7 +4,7 @@ import json
+ 
+ import httpx
+ from fastapi import APIRouter, Depends, HTTPException
+-from pydantic import BaseModel
++from pydantic import BaseModel, Field
+ from sqlalchemy import desc, func, or_, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+@@ -345,6 +345,8 @@ class ModelIn(BaseModel):
+     cost_out: float = 0
+     price_in: float | None = None
+     price_out: float | None = None
++    cache_read_mult: float | None = Field(None, ge=0, le=10)
++    cache_write_mult: float | None = Field(None, ge=0, le=10)
+     routes: list[RouteIn] = []
+ 
+ 
+@@ -355,6 +357,7 @@ async def model_out(m: Model, markup: float, names: dict) -> dict:
+             "supports_vision": m.supports_vision, "supports_tools": m.supports_tools, "is_enabled": m.is_enabled,
+             "cost_in": m.cost_in, "cost_out": m.cost_out, "price_in": m.price_in, "price_out": m.price_out,
+             "eff_price_in": pin, "eff_price_out": pout,
++            "cache_read_mult": m.cache_read_mult, "cache_write_mult": m.cache_write_mult,
+             "routes": [{"provider_id": r.provider_id, "provider": names.get(r.provider_id, "?"),
+                         "upstream_model": r.upstream_model, "priority": r.priority} for r in m.routes]}
+ 
+@@ -369,7 +372,8 @@ async def list_models(session: AsyncSession = Depends(get_session)):
+ 
+ async def _apply_model(m: Model, data: ModelIn, session):
+     for f in ("public_id", "display_name", "description", "family", "kind", "context_length", "max_output",
+-              "supports_vision", "supports_tools", "is_enabled", "cost_in", "cost_out", "price_in", "price_out"):
++              "supports_vision", "supports_tools", "is_enabled", "cost_in", "cost_out", "price_in", "price_out",
++              "cache_read_mult", "cache_write_mult"):
+         setattr(m, f, getattr(data, f))
+     m.public_id = m.public_id.strip()
+     if not m.public_id:
+diff --git a/app/api_user.py b/app/api_user.py
+index 2b57920..f750304 100644
+--- a/app/api_user.py
++++ b/app/api_user.py
+@@ -9,9 +9,9 @@ from sqlalchemy import desc, func, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from . import errors, growth, payments, receipts, settings_store
+-from .billing import sale_prices, to_nano, usd
++from .billing import cache_mults, sale_prices, to_nano, usd
+ from .db import get_session
+-from .models import ApiKey, Model, Payment, Referral, RequestLog, Transaction, User, now
++from .models import ApiKey, Model, Payment, Provider, Referral, RequestLog, Transaction, User, now
+ from .security import current_user, hash_password, make_token, new_api_key, verify_password
+ 
+ router = APIRouter(prefix="/api")
+@@ -58,15 +58,23 @@ async def public_catalog(session: AsyncSession, popular: bool = True) -> list[di
+                                                      RequestLog.status_code < 400)
+         .group_by(RequestLog.model).order_by(desc(func.count())).limit(3))).all() if popular else []
+     popular = {m for m, c in top if c > 0}
++    types = {p.id: p.type for p in (await session.execute(select(Provider).where(Provider.is_enabled == True))).scalars()}
+     out = []
+     for m in rows:
+         if not m.routes:
+             continue
+         pin, pout = sale_prices(m, g["default_markup"])
++        # cache prices follow the primary route; shown where the provider is known to cache or the admin set them
++        ptype = next((types[r.provider_id] for r in sorted(m.routes, key=lambda r: r.priority) if r.provider_id in types), None)
++        rm, wm = cache_mults(m, ptype)
++        chat = m.kind == "chat" and pin > 0
++        cr = round(pin * rm, 6) if chat and (m.cache_read_mult is not None or ptype in ("anthropic", "openai")) else None
++        cw = round(pin * wm, 6) if chat and (m.cache_write_mult is not None or ptype == "anthropic") else None
+         out.append({"id": m.public_id, "name": m.display_name or m.public_id, "family": m.family, "kind": m.kind,
+                     "description": m.description, "context_length": m.context_length,
+                     "max_output": m.max_output, "vision": m.supports_vision, "tools": m.supports_tools,
+-                    "price_in": pin, "price_out": pout, "popular": m.public_id in popular})
++                    "price_in": pin, "price_out": pout, "price_cache_read": cr, "price_cache_write": cw,
++                    "popular": m.public_id in popular})
+     return out
+ 
+ 
+@@ -296,6 +304,7 @@ async def my_usage(days: int = 30, date_from: str = "", date_to: str = "", user:
+ def log_out(r: RequestLog, admin=False) -> dict:
+     d = {"id": r.id, "request_id": r.request_id, "model": r.model, "endpoint": r.endpoint, "stream": r.stream,
+          "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens, "price": usd(r.price),
++         "cached_tokens": r.cache_read_tokens, "cache_write_tokens": r.cache_write_tokens,
+          "latency_ms": r.latency_ms, "status_code": r.status_code, "created_at": r.created_at.isoformat()}
+     if admin:
+         d.update(cost=usd(r.cost), profit=usd(r.price - r.cost), provider_id=r.provider_id,
+diff --git a/app/billing.py b/app/billing.py
+index 0f4e9e0..7382c70 100644
+--- a/app/billing.py
++++ b/app/billing.py
+@@ -4,6 +4,7 @@ from decimal import ROUND_CEILING, Decimal
+ 
+ from sqlalchemy import update
+ 
++from .adapters import Usage
+ from .db import SessionLocal
+ from .models import NANO, ApiKey, Model, ProviderKey, RequestLog, User, now
+ 
+@@ -29,17 +30,40 @@ def calc(tokens_in: int, tokens_out: int, per_in: float, per_out: float) -> int:
+     return int(v.to_integral_value(rounding=ROUND_CEILING))
+ 
+ 
++CACHE_MULTS = {"anthropic": (0.1, 1.25)}  # Anthropic: cache reads cost 10% of the input price, 5-minute writes 125%
++# Others: the smallest discount among them (OpenAI 50–90%, DeepSeek and Gemini 75–90%), so the recorded cost of
++# cached tokens is never below what the provider charges. Admins can set exact shares per model.
++DEFAULT_CACHE_MULTS = (0.5, 1.0)
++CACHE_WRITE_1H = 2.0  # Anthropic 1-hour cache writes, share of the input price
++
++
++def cache_mults(model: Model, provider_type: str | None) -> tuple[float, float]:
++    r, w = CACHE_MULTS.get(provider_type or "", DEFAULT_CACHE_MULTS)
++    return (model.cache_read_mult if model.cache_read_mult is not None else r,
++            model.cache_write_mult if model.cache_write_mult is not None else w)
++
++
++def calc_usage(u: Usage, per_in: float, per_out: float, read_mult: float = 1.0, write_mult: float = 1.0) -> int:
++    """calc() with cached input tokens priced at their share of the input price."""
++    d = lambda x: Decimal(str(x))
++    plain = max(0, u.tin - u.cache_read - u.cache_write - u.cache_write_1h)
++    tin = d(plain) + d(u.cache_read) * d(read_mult) + d(u.cache_write) * d(write_mult) + d(u.cache_write_1h) * d(CACHE_WRITE_1H)
++    v = (tin * d(per_in) + d(u.tout) * d(per_out)) / Decimal(1_000_000) * NANO
++    return int(v.to_integral_value(rounding=ROUND_CEILING))
++
++
+ _bg: set = set()
+ 
+ 
+ async def record(*, request_id, user_id, api_key_id, model_name, provider_id, provider_key_id, endpoint,
+                  stream, tokens_in, tokens_out, cost, price, latency_ms, status_code, error="", ip="",
+-                 attempts=1):
++                 attempts=1, cache_read=0, cache_write=0):
+     """Persist request log and atomically charge balance."""
+     async with SessionLocal() as s:
+         s.add(RequestLog(request_id=request_id, user_id=user_id, api_key_id=api_key_id, model=model_name,
+                          provider_id=provider_id, provider_key_id=provider_key_id, endpoint=endpoint,
+-                         stream=stream, prompt_tokens=tokens_in, completion_tokens=tokens_out, cost=cost,
++                         stream=stream, prompt_tokens=tokens_in, completion_tokens=tokens_out,
++                         cache_read_tokens=cache_read, cache_write_tokens=cache_write, cost=cost,
+                          price=price, latency_ms=latency_ms, status_code=status_code, error=error[:2000],
+                          ip=ip, attempts=attempts))
+         if price and user_id:
+diff --git a/app/main.py b/app/main.py
+index 7e2c2cb..9f71326 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
+ 
+ from fastapi import FastAPI, Request
+ from fastapi.exceptions import RequestValidationError
+-from fastapi.responses import JSONResponse
++from fastapi.responses import JSONResponse, Response
+ from fastapi.staticfiles import StaticFiles
+-from sqlalchemy import select
++from sqlalchemy import inspect, select, text
+ 
+ from . import api_admin, api_user, oauth, payments, proxy, seo, status, support
+ from .config import ADMIN_EMAIL, ADMIN_PASSWORD
+@@ -19,9 +19,26 @@ log = logging.getLogger("gateway")
+ STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
+ 
+ 
++# create_all() never alters existing tables: columns added after the first release are created here
++NEW_COLUMNS = {
++    "models": {"cache_read_mult": "FLOAT", "cache_write_mult": "FLOAT"},
++    "request_logs": {"cache_read_tokens": "INTEGER NOT NULL DEFAULT 0", "cache_write_tokens": "INTEGER NOT NULL DEFAULT 0"},
++}
++
++
++def add_new_columns(conn):
++    insp = inspect(conn)
++    for table, cols in NEW_COLUMNS.items():
++        have = {c["name"] for c in insp.get_columns(table)}
++        for name, ddl in cols.items():
++            if name not in have:
++                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
++
++
+ async def init_db():
+     async with engine.begin() as conn:
+         await conn.run_sync(Base.metadata.create_all)
++        await conn.run_sync(add_new_columns)
+     async with SessionLocal() as s:
+         admin = (await s.execute(select(User).where(User.role == "admin"))).scalars().first()
+         if not admin:
+@@ -110,4 +127,10 @@ async def health():
+     return {"status": "ok"}
+ 
+ 
++@app.api_route("/api/hello", methods=["GET", "HEAD"], include_in_schema=False)
++async def hello():
++    """Connection probe that Claude Code sends to Anthropic-format gateways."""
++    return Response(status_code=200)
++
++
+ app.mount("/static", StaticFiles(directory=STATIC), name="static")
+diff --git a/app/models.py b/app/models.py
+index 250020a..3e8ed44 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -94,6 +94,9 @@ class Model(Base):
+     cost_out: Mapped[float] = mapped_column(Float, default=0)
+     price_in: Mapped[float | None] = mapped_column(Float, nullable=True)  # USD per 1M (sale); null => cost*(1+markup)
+     price_out: Mapped[float | None] = mapped_column(Float, nullable=True)
++    # prompt-cache prices as a share of the input price; null => default for the provider type (billing.cache_mults)
++    cache_read_mult: Mapped[float | None] = mapped_column(Float, nullable=True)
++    cache_write_mult: Mapped[float | None] = mapped_column(Float, nullable=True)
+     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+     routes: Mapped[list["ModelRoute"]] = relationship(cascade="all, delete-orphan", lazy="selectin",
+                                                       order_by="ModelRoute.priority")
+@@ -146,6 +149,9 @@ class RequestLog(Base):
+     stream: Mapped[bool] = mapped_column(Boolean, default=False)
+     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
++    # parts of prompt_tokens read from / written to the prompt cache; server default keeps raw INSERTs working
++    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
++    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+     cost: Mapped[int] = mapped_column(BigInteger, default=0)
+     price: Mapped[int] = mapped_column(BigInteger, default=0)
+     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+diff --git a/app/proxy.py b/app/proxy.py
+index 17199c7..761d27c 100644
+--- a/app/proxy.py
++++ b/app/proxy.py
+@@ -11,11 +11,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
+ from sqlalchemy import select, update
+ 
+ from . import errors, settings_store
+-from .adapters import (AnthropicStreamToOpenAI, anthropic_to_openai, anthropic_usage, estimate_tokens,
+-                       openai_to_anthropic)
+-from .billing import calc, record, record_bg, sale_prices, usd
++from .adapters import (AnthropicStreamToOpenAI, Usage, anthropic_to_openai, anthropic_usage_of, estimate_tokens,
++                       openai_to_anthropic, openai_usage_of)
++from .billing import cache_mults, calc_usage, record, record_bg, sale_prices, usd
+ from .db import SessionLocal
+ from .models import NANO, ApiKey, Model, Provider, ProviderKey, User, now
++from .responses import ResponsesError, ResponseStream, chat_to_response, responses_to_chat, sse_event
+ from .security import decrypt, hash_key
+ 
+ router = APIRouter(prefix="/v1")
+@@ -75,24 +76,32 @@ class Ctx:
+         self.user, self.key, self.model, self.rid, self.ip, self.endpoint = user, key, model, rid, ip, endpoint
+         self.price_in, self.price_out = sale_prices(model, markup)
+         self.t0 = time.perf_counter()
++        self.fwd = {}  # anthropic-version / anthropic-beta from the client, passed on to Anthropic upstreams
+ 
+-    def bill_kwargs(self, provider_id, provider_key_id, tin, tout, stream, status=200, error="", attempts=1):
++    def charge(self, u: Usage, p: Provider | None, cost=False) -> int:
++        rm, wm = cache_mults(self.model, p.type if p else None)
++        if cost:
++            return calc_usage(u, self.model.cost_in, self.model.cost_out, rm, wm)
++        return calc_usage(u, self.price_in, self.price_out, rm, wm)
++
++    def bill_kwargs(self, p, provider_key_id, u: Usage | None, stream, status=200, error="", attempts=1):
++        u, ok = u or Usage(), status < 400
+         return dict(request_id=self.rid, user_id=self.user.id, api_key_id=self.key.id,
+-                    model_name=self.model.public_id, provider_id=provider_id, provider_key_id=provider_key_id,
+-                    endpoint=self.endpoint, stream=stream, tokens_in=tin, tokens_out=tout,
+-                    cost=calc(tin, tout, self.model.cost_in, self.model.cost_out) if status < 400 else 0,
+-                    price=calc(tin, tout, self.price_in, self.price_out) if status < 400 else 0,
++                    model_name=self.model.public_id, provider_id=p.id if p else None, provider_key_id=provider_key_id,
++                    endpoint=self.endpoint, stream=stream, tokens_in=u.tin, tokens_out=u.tout,
++                    cache_read=u.cache_read, cache_write=u.cache_write + u.cache_write_1h,
++                    cost=self.charge(u, p, cost=True) if ok else 0, price=self.charge(u, p) if ok else 0,
+                     latency_ms=int((time.perf_counter() - self.t0) * 1000), status_code=status, error=error,
+                     ip=self.ip, attempts=attempts)
+ 
+-    def headers(self, tin=0, tout=0):
++    def headers(self, u: Usage | None = None, p: Provider | None = None):
+         h = {"X-Request-ID": self.rid}
+-        if tin or tout:
+-            h["X-Cost"] = f"{usd(calc(tin, tout, self.price_in, self.price_out)):.9f}"
++        if u and (u.tin or u.tout):
++            h["X-Cost"] = f"{usd(self.charge(u, p)):.9f}"
+         return h
+ 
+ 
+-async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",)) -> Ctx:
++async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",), metered=True) -> Ctx:
+     auth = request.headers.get("authorization", "")
+     raw = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
+     if not raw:
+@@ -120,7 +129,7 @@ async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",))
+                                "insufficient_quota", "key_limit_reached")
+         general = await settings_store.get(s, "general")
+         rpm = int(general.get("rate_limit_rpm") or 0)
+-        if rpm > 0:
++        if rpm > 0 and metered:
+             q, t = _rate[key.id], time.monotonic()
+             while q and q[0] < t - 60:
+                 q.popleft()
+@@ -148,7 +157,9 @@ async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",))
+             raise GatewayError(404, errors.model_not_found(name, list(ids)), "invalid_request_error",
+                                "model_not_found")
+         markup = user.markup if user.markup is not None else general.get("default_markup", 0)
+-        return Ctx(user, key, model, markup, "req_" + secrets.token_hex(12), client_ip(request), endpoint)
++        ctx = Ctx(user, key, model, markup, "req_" + secrets.token_hex(12), client_ip(request), endpoint)
++        ctx.fwd = {h: v for h in ("anthropic-version", "anthropic-beta") if (v := request.headers.get(h))}
++        return ctx
+ 
+ 
+ async def candidates(model: Model, types=None):
+@@ -187,9 +198,11 @@ async def mark_key_ok(key_id: int):
+         await s.commit()
+ 
+ 
+-def upstream_headers(p: Provider, secret: str) -> dict:
++def upstream_headers(p: Provider, secret: str, fwd: dict | None = None) -> dict:
+     if p.type == "anthropic":
+         h = {"x-api-key": secret, "anthropic-version": "2023-06-01"}
++        # Claude Code pairs body fields (thinking, context_management, …) with anthropic-beta values: pass them as is
++        h.update(fwd or {})
+     else:
+         h = {"Authorization": f"Bearer {secret}"}
+     try:
+@@ -209,7 +222,7 @@ async def send_with_fallback(ctx: Ctx, cands, build):
+     for n, (route, p, key_id, secret) in enumerate(cands, 1):
+         url, payload = build(route, p)
+         try:
+-            req = http.build_request("POST", url, json=payload, headers=upstream_headers(p, secret),
++            req = http.build_request("POST", url, json=payload, headers=upstream_headers(p, secret, ctx.fwd),
+                                      timeout=httpx.Timeout(p.timeout, connect=15))
+             resp = await http.send(req, stream=True)
+         except httpx.HTTPError as e:
+@@ -234,10 +247,10 @@ async def send_with_fallback(ctx: Ctx, cands, build):
+                 msg = (j.get("error") or {}).get("message") or text
+             except Exception:
+                 pass
+-            await record(**ctx.bill_kwargs(p.id, key_id, 0, 0, False, resp.status_code, last, n))
++            await record(**ctx.bill_kwargs(p, key_id, None, False, resp.status_code, last, n))
+             raise GatewayError(resp.status_code, errors.upstream_bad_request(str(msg), ctx.model),
+                                "invalid_request_error", "upstream_bad_request")
+-    await record(**ctx.bill_kwargs(None, None, 0, 0, False, 502, last, len(cands)))
++    await record(**ctx.bill_kwargs(None, None, None, False, 502, last, len(cands)))
+     raise GatewayError(502, f"Модель {ctx.model.public_id} временно не отвечает. Повторите запрос через минуту "
+                             "или выберите другую модель.", "api_error", "upstream_unavailable",
+                        headers={"Retry-After": "30"})
+@@ -290,17 +303,17 @@ async def chat_completions(request: Request):
+         finally:
+             await resp.aclose()
+         if p.type == "anthropic":
++            u = anthropic_usage_of(data.get("usage"))
+             data = anthropic_to_openai(data, ctx.model.public_id)
+         else:
++            u = openai_usage_of(data.get("usage"))
+             data["model"] = ctx.model.public_id
+-        u = data.get("usage") or {}
+-        tin = u.get("prompt_tokens") or prompt_est
+-        tout = u.get("completion_tokens") or 0
+-        await record(**ctx.bill_kwargs(p.id, key_id, tin, tout, False, attempts=n))
+-        return JSONResponse(data, headers=ctx.headers(tin, tout))
++        u.tin = u.tin or prompt_est
++        await record(**ctx.bill_kwargs(p, key_id, u, False, attempts=n))
++        return JSONResponse(data, headers=ctx.headers(u, p))
+ 
+     async def gen():
+-        tin, tout, chars, got_usage = 0, 0, 0, False
++        u, chars, got_usage = Usage(), 0, False
+         conv = AnthropicStreamToOpenAI(ctx.model.public_id, want_usage) if p.type == "anthropic" else None
+         status, err = 200, ""
+         try:
+@@ -318,15 +331,13 @@ async def chat_completions(request: Request):
+                 if conv is not None:
+                     for ch in conv.feed(obj):
+                         yield sse(ch)
+-                    tin, tout, chars = conv.prompt_tokens, conv.completion_tokens, conv.text_chars
++                    u, chars = conv.usage, conv.text_chars
+                     got_usage = conv.completion_tokens > 0
+                     if conv.done:
+                         yield b"data: [DONE]\n\n"
+                     continue
+                 if obj.get("usage"):
+-                    tin = obj["usage"].get("prompt_tokens") or tin
+-                    tout = obj["usage"].get("completion_tokens") or tout
+-                    got_usage = True
++                    u, got_usage = openai_usage_of(obj["usage"]), True
+                 for c in obj.get("choices") or []:
+                     d = c.get("delta") or {}
+                     chars += len(d.get("content") or "") + len(d.get("reasoning_content") or "")
+@@ -341,9 +352,9 @@ async def chat_completions(request: Request):
+             status, err = 200, f"stream interrupted: {type(e).__name__}"
+         finally:
+             if not got_usage:
+-                tin = tin or prompt_est
+-                tout = tout or estimate_tokens("x" * chars)
+-            record_bg(**ctx.bill_kwargs(p.id, key_id, tin or prompt_est, tout, True, status, err, n))
++                u.tout = u.tout or estimate_tokens("x" * chars)
++            u.tin = u.tin or prompt_est
++            record_bg(**ctx.bill_kwargs(p, key_id, u, True, status, err, n))
+             try:
+                 await resp.aclose()
+             except Exception:
+@@ -384,12 +395,12 @@ async def messages(request: Request):
+         finally:
+             await resp.aclose()
+         data["model"] = ctx.model.public_id
+-        tin, tout = anthropic_usage(data.get("usage"))
+-        await record(**ctx.bill_kwargs(p.id, key_id, tin, tout, False, attempts=n))
+-        return JSONResponse(data, headers=ctx.headers(tin, tout))
++        u = anthropic_usage_of(data.get("usage"))
++        await record(**ctx.bill_kwargs(p, key_id, u, False, attempts=n))
++        return JSONResponse(data, headers=ctx.headers(u, p))
+ 
+     async def gen():
+-        tin = tout = 0
++        raw = {}  # usage as Anthropic reports it: input parts in message_start, cumulative counts in message_delta
+         try:
+             async for line in resp.aiter_lines():
+                 if line.startswith("data:"):
+@@ -397,15 +408,15 @@ async def messages(request: Request):
+                         ev = json.loads(line[5:])
+                         if ev.get("type") == "message_start":
+                             ev["message"]["model"] = ctx.model.public_id
+-                            tin, tout = anthropic_usage(ev["message"].get("usage"))
++                            raw.update(ev["message"].get("usage") or {})
+                             line = "data: " + json.dumps(ev, ensure_ascii=False)
+                         elif ev.get("type") == "message_delta":
+-                            tout = (ev.get("usage") or {}).get("output_tokens") or tout
++                            raw.update({k: v for k, v in (ev.get("usage") or {}).items() if v is not None})
+                     except Exception:
+                         pass
+                 yield (line + "\n").encode()
+         finally:
+-            record_bg(**ctx.bill_kwargs(p.id, key_id, tin, tout, True, attempts=n))
++            record_bg(**ctx.bill_kwargs(p, key_id, anthropic_usage_of(raw), True, attempts=n))
+             try:
+                 await resp.aclose()
+             except Exception:
+@@ -415,6 +426,171 @@ async def messages(request: Request):
+                              headers={**ctx.headers(), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+ 
+ 
++@router.post("/messages/count_tokens")
++async def count_tokens(request: Request):
++    """Exact context size for Claude Code. Free at Anthropic, so nothing is charged and the rate limit is not used."""
++    rid = ""
++    try:
++        body = await read_body(request)
++        ctx = await resolve(request, body, "count_tokens", metered=False)
++        check_messages(body)
++        rid = ctx.rid
++        cands = await candidates(ctx.model, types=("anthropic",))
++        if not cands:
++            raise GatewayError(400, f"Подсчёт токенов доступен только для моделей в формате Anthropic, "
++                                    f"а {ctx.model.public_id} к ним не относится.", "invalid_request_error",
++                               "wrong_endpoint")
++        resp, route, p, key_id, n = await send_with_fallback(
++            ctx, cands, lambda route, p: (p.base_url.rstrip("/") + "/messages/count_tokens",
++                                          {**body, "model": route.upstream_model}))
++    except GatewayError as e:
++        return error_response(e, rid, anthropic=True)
++    try:
++        data = json.loads(await resp.aread())
++    finally:
++        await resp.aclose()
++    return JSONResponse(data, headers={"X-Request-ID": rid})
++
++
++# --------------------------------------------------------------------------- /v1/responses (Codex CLI)
++@router.post("/responses")
++async def responses(request: Request):
++    rid = ""
++    try:
++        body = await read_body(request)
++        ctx = await resolve(request, body, "responses")
++        rid = ctx.rid
++        stream = bool(body.get("stream"))
++        try:
++            chat, bad = responses_to_chat(body), None
++        except ResponsesError as e:
++            chat, bad = None, str(e)
++        cands = await candidates(ctx.model)
++
++        def build(route, p):
++            base = p.base_url.rstrip("/")
++            if p.type == "openai":  # OpenAI serves this API itself: pass the request through, nothing is lost
++                return base + "/responses", {**body, "model": route.upstream_model}
++            if bad:
++                raise GatewayError(400, bad, code="unsupported_field")
++            if p.type == "anthropic":
++                return base + "/messages", openai_to_anthropic(chat, route.upstream_model, ctx.model.max_output)
++            payload = {**chat, "model": route.upstream_model}
++            if stream:
++                payload["stream_options"] = {"include_usage": True}
++            return base + "/chat/completions", payload
++
++        resp, route, p, key_id, n = await send_with_fallback(ctx, cands, build)
++    except GatewayError as e:
++        return error_response(e, rid)
++
++    public = ctx.model.public_id
++    prompt_est = estimate_tokens(str(body.get("instructions") or "") + json.dumps(body.get("input"), ensure_ascii=False))
++
++    if not stream:
++        try:
++            data = json.loads(await resp.aread())
++        finally:
++            await resp.aclose()
++        if p.type == "openai":
++            u = openai_usage_of(data.get("usage"))
++            data["model"] = public
++        elif p.type == "anthropic":
++            u = anthropic_usage_of(data.get("usage"))
++            u.tin = u.tin or prompt_est
++            data = chat_to_response(body, anthropic_to_openai(data, public), u, public)
++        else:
++            u = openai_usage_of(data.get("usage"))
++            u.tin = u.tin or prompt_est
++            data = chat_to_response(body, data, u, public)
++        u.tin = u.tin or prompt_est
++        await record(**ctx.bill_kwargs(p, key_id, u, False, attempts=n))
++        return JSONResponse(data, headers=ctx.headers(u, p))
++
++    async def native():
++        u, got, chars, status, err = Usage(), False, 0, 200, ""
++        try:
++            async for line in resp.aiter_lines():
++                if line.startswith("data:"):
++                    try:
++                        ev = json.loads(line[5:])
++                    except json.JSONDecodeError:
++                        ev = None
++                    if isinstance(ev, dict):
++                        if ev.get("type") in ("response.output_text.delta", "response.function_call_arguments.delta"):
++                            chars += len(ev.get("delta") or "")
++                        r = ev.get("response")
++                        if isinstance(r, dict):  # created / in_progress / completed / incomplete / failed
++                            r["model"] = public
++                            if r.get("usage"):
++                                u, got = openai_usage_of(r["usage"]), True
++                            line = "data: " + json.dumps(ev, ensure_ascii=False)
++                yield (line + "\n").encode()
++        except Exception as e:  # upstream broke mid-stream
++            status, err = 200, f"stream interrupted: {type(e).__name__}"
++        finally:
++            if not got:
++                u = Usage(prompt_est, estimate_tokens("x" * chars))
++            record_bg(**ctx.bill_kwargs(p, key_id, u, True, status, err, n))
++            try:
++                await resp.aclose()
++            except Exception:
++                pass
++
++    async def converted():
++        conv = ResponseStream(body, public)
++        anth = AnthropicStreamToOpenAI(public, False) if p.type == "anthropic" else None
++        st = {"u": Usage(), "got": False}
++        status, err, fail = 200, "", None
++
++        def usage():
++            u = st["u"]
++            if not st["got"]:
++                u = Usage(u.tin or prompt_est, u.tout or estimate_tokens("x" * conv.chars), u.cache_read,
++                          u.cache_write, u.cache_write_1h)
++            u.tin = u.tin or prompt_est
++            return u
++
++        try:
++            for e in conv.start():
++                yield sse_event(e)
++            try:
++                async for data in iter_sse_data(resp):
++                    if not data or data == "[DONE]":
++                        continue
++                    try:
++                        obj = json.loads(data)
++                    except json.JSONDecodeError:
++                        continue
++                    if anth:
++                        chunks = anth.feed(obj)
++                        st["u"], st["got"] = anth.usage, anth.completion_tokens > 0
++                    else:
++                        chunks = [obj]
++                        if obj.get("usage"):
++                            st["u"], st["got"] = openai_usage_of(obj["usage"]), True
++                    for ch in chunks:
++                        if "error" in ch:
++                            fail = (ch["error"] or {}).get("message") or "upstream error"
++                            continue
++                        for e in conv.feed(ch):
++                            yield sse_event(e)
++            except Exception as e:  # upstream broke mid-stream
++                status, err = 200, f"stream interrupted: {type(e).__name__}"
++                fail = "Соединение с моделью прервалось. Повторите запрос."
++            for e in conv.finish(usage(), fail):
++                yield sse_event(e)
++        finally:
++            record_bg(**ctx.bill_kwargs(p, key_id, usage(), True, status, err, n))
++            try:
++                await resp.aclose()
++            except Exception:
++                pass
++
++    return StreamingResponse(native() if p.type == "openai" else converted(), media_type="text/event-stream",
++                             headers={**ctx.headers(), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
++
++
+ # --------------------------------------------------------------------------- /v1/embeddings
+ @router.post("/embeddings")
+ async def embeddings(request: Request):
+@@ -438,9 +614,9 @@ async def embeddings(request: Request):
+     finally:
+         await resp.aclose()
+     data["model"] = ctx.model.public_id
+-    tin = (data.get("usage") or {}).get("prompt_tokens") or 0
+-    await record(**ctx.bill_kwargs(p.id, key_id, tin, 0, False, attempts=n))
+-    return JSONResponse(data, headers=ctx.headers(tin, 0))
++    u = Usage((data.get("usage") or {}).get("prompt_tokens") or 0)
++    await record(**ctx.bill_kwargs(p, key_id, u, False, attempts=n))
++    return JSONResponse(data, headers=ctx.headers(u, p))
+ 
+ 
+ # --------------------------------------------------------------------------- /v1/models, /v1/balance
+@@ -449,7 +625,8 @@ async def list_models():
+     async with SessionLocal() as s:
+         rows = (await s.execute(select(Model).where(Model.is_enabled == True).order_by(Model.public_id))).scalars()
+         data = [{"id": m.public_id, "object": "model", "created": int(m.created_at.timestamp()),
+-                 "owned_by": m.family or "gateway", "context_length": m.context_length} for m in rows]
++                 "owned_by": m.family or "gateway", "display_name": m.display_name or m.public_id,
++                 "context_length": m.context_length} for m in rows]
+     return {"object": "list", "data": data}
+ 
+ 
+diff --git a/app/responses.py b/app/responses.py
+new file mode 100644
+index 0000000..8765868
+--- /dev/null
++++ b/app/responses.py
+@@ -0,0 +1,329 @@
++"""OpenAI Responses API (/v1/responses) for providers that only speak Chat Completions or Anthropic Messages.
++
++Codex CLI talks to custom providers only through this API. The request becomes a chat request (and, for Anthropic
++routes, a Messages request via adapters.openai_to_anthropic); the answer or stream is turned back into a Response
++object or Responses events. What has no chat counterpart is dropped: reasoning items sent back by the client,
++built-in tools (web search, local shell), stored conversations."""
++import json
++import time
++import uuid
++
++from .adapters import Usage
++
++TEXT_PARTS = ("input_text", "output_text", "text")
++FINISH = {"length": ("incomplete", {"reason": "max_output_tokens"}),
++          "content_filter": ("incomplete", {"reason": "content_filter"})}
++
++
++class ResponsesError(ValueError):
++    """Request that cannot be expressed as a chat request; the message is shown to the client."""
++
++
++def _id(prefix: str) -> str:
++    return f"{prefix}_{uuid.uuid4().hex[:24]}"
++
++
++def _text(content) -> str:
++    if isinstance(content, str):
++        return content
++    if isinstance(content, list):
++        return "\n".join(p.get("text") or "" for p in content if isinstance(p, dict) and p.get("type") in TEXT_PARTS)
++    return ""
++
++
++def _user_content(content):
++    if not isinstance(content, list):
++        return _text(content)
++    parts = []
++    for p in content:
++        if not isinstance(p, dict):
++            continue
++        if p.get("type") in TEXT_PARTS:
++            parts.append({"type": "text", "text": p.get("text") or ""})
++        elif p.get("type") == "input_image" and p.get("image_url"):
++            url = p["image_url"] if isinstance(p["image_url"], str) else p["image_url"].get("url")
++            parts.append({"type": "image_url", "image_url": {"url": url}})
++    if all(p["type"] == "text" for p in parts):
++        return "\n".join(p["text"] for p in parts)
++    return parts
++
++
++def _output(out) -> str:
++    """function_call_output.output: a string, or content parts in newer clients (images are dropped)."""
++    if isinstance(out, str):
++        return out
++    if isinstance(out, list):
++        return _text(out)
++    return "" if out is None else json.dumps(out, ensure_ascii=False)
++
++
++def _custom_tool(t: dict) -> dict:
++    """Freeform tools (Codex apply_patch) take raw text: chat models get a function with one string argument."""
++    desc, fmt = t.get("description") or "", t.get("format") or {}
++    if fmt.get("type") == "grammar" and fmt.get("definition"):
++        desc += f"\n\nThe input must match this {fmt.get('syntax') or ''} grammar:\n{fmt['definition']}"
++    return {"type": "function", "function": {"name": t["name"], "description": desc.strip(), "parameters": {
++        "type": "object", "properties": {"input": {"type": "string", "description": "Raw tool input"}},
++        "required": ["input"]}}}
++
++
++def responses_to_chat(body: dict) -> dict:
++    """Responses request -> Chat Completions request (without "model")."""
++    for k in ("previous_response_id", "conversation"):
++        if body.get(k):
++            raise ResponsesError(f"Поле «{k}» для этой модели не поддерживается: ответы не хранятся на сервере. "
++                                 "Передавайте всю историю в «input» и store: false.")
++    inp = body.get("input")
++    if isinstance(inp, str):
++        inp = [{"role": "user", "content": inp}]
++    if not isinstance(inp, list) or not inp:
++        raise ResponsesError("Поле «input» обязательно: строка или непустой список сообщений.")
++
++    msgs, calls = [], set()
++    if body.get("instructions"):
++        msgs.append({"role": "system", "content": body["instructions"]})
++
++    def call(call_id, name, args):
++        if msgs and msgs[-1]["role"] == "assistant":  # tool calls of one turn belong to one assistant message
++            last = msgs[-1]
++        else:
++            last = {"role": "assistant", "content": None}
++            msgs.append(last)
++        last.setdefault("tool_calls", []).append({"id": call_id, "type": "function",
++                                                  "function": {"name": name, "arguments": args}})
++        calls.add(call_id)
++
++    for it in inp:
++        if not isinstance(it, dict):
++            continue
++        t = it.get("type") or ("message" if it.get("role") else "")
++        if t == "message":
++            role = it.get("role")
++            if role in ("system", "developer"):
++                msgs.append({"role": "system", "content": _text(it.get("content"))})
++            elif role == "assistant":
++                if text := _text(it.get("content")):
++                    msgs.append({"role": "assistant", "content": text})
++            else:
++                msgs.append({"role": "user", "content": _user_content(it.get("content"))})
++        elif t == "function_call":
++            call(it.get("call_id") or it.get("id") or _id("call"), it.get("name") or "", it.get("arguments") or "{}")
++        elif t == "custom_tool_call":
++            call(it.get("call_id") or _id("call"), it.get("name") or "",
++                 json.dumps({"input": it.get("input") or ""}, ensure_ascii=False))
++        elif t in ("function_call_output", "custom_tool_call_output") and it.get("call_id") in calls:
++            msgs.append({"role": "tool", "tool_call_id": it["call_id"], "content": _output(it.get("output"))})
++        # reasoning, web_search_call, local_shell_call and other built-in items have no chat counterpart
++
++    out = {"messages": msgs}
++    tools = []
++    for t in body.get("tools") or []:
++        if t.get("type") == "function" and t.get("name"):
++            tools.append({"type": "function", "function": {
++                "name": t["name"], "description": t.get("description") or "",
++                "parameters": t.get("parameters") or {"type": "object", "properties": {}}}})
++        elif t.get("type") == "custom" and t.get("name"):
++            tools.append(_custom_tool(t))
++    if tools:
++        out["tools"] = tools
++        tc = body.get("tool_choice")
++        if tc in ("auto", "none", "required"):
++            out["tool_choice"] = tc
++        elif isinstance(tc, dict) and tc.get("name"):
++            out["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
++    if body.get("max_output_tokens"):
++        out["max_tokens"] = body["max_output_tokens"]
++    for k in ("temperature", "top_p", "stream"):
++        if body.get(k) is not None:
++            out[k] = body[k]
++    fmt = (body.get("text") or {}).get("format") or {}
++    if fmt.get("type") == "json_schema":
++        out["response_format"] = {"type": "json_schema", "json_schema": {
++            k: fmt[k] for k in ("name", "description", "schema", "strict") if k in fmt}}
++    elif fmt.get("type") == "json_object":
++        out["response_format"] = {"type": "json_object"}
++    return out
++
++
++def usage_out(u: Usage) -> dict:
++    return {"input_tokens": u.tin, "input_tokens_details": {"cached_tokens": u.cache_read},
++            "output_tokens": u.tout, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": u.tin + u.tout}
++
++
++class ResponseBuilder:
++    """Response object of one request."""
++
++    def __init__(self, body: dict, public_model: str):
++        self.body, self.model = body, public_model
++        self.id, self.created = _id("resp"), int(time.time())
++        self.custom = {t.get("name") for t in body.get("tools") or [] if t.get("type") == "custom"}
++
++    def envelope(self, status, output, usage: Usage | None = None, error=None, incomplete=None) -> dict:
++        b = self.body
++        return {"id": self.id, "object": "response", "created_at": self.created, "status": status,
++                "model": self.model, "output": output, "error": error, "incomplete_details": incomplete,
++                "instructions": b.get("instructions"), "max_output_tokens": b.get("max_output_tokens"),
++                "parallel_tool_calls": b.get("parallel_tool_calls", True), "tool_choice": b.get("tool_choice", "auto"),
++                "tools": b.get("tools") or [], "temperature": b.get("temperature"), "top_p": b.get("top_p"),
++                "text": b.get("text") or {"format": {"type": "text"}}, "reasoning": b.get("reasoning"),
++                "store": False, "metadata": b.get("metadata") or {}, "usage": usage_out(usage) if usage else None}
++
++    def call_item(self, call_id, name, args, status="completed", item_id=None) -> dict:
++        if name in self.custom:
++            try:
++                inp = json.loads(args or "{}").get("input", "")
++            except (ValueError, AttributeError):
++                inp = args
++            return {"type": "custom_tool_call", "id": item_id or _id("ctc"), "call_id": call_id, "name": name,
++                    "input": inp, "status": status}
++        return {"type": "function_call", "id": item_id or _id("fc"), "call_id": call_id, "name": name,
++                "arguments": args or "", "status": status}
++
++
++def chat_to_response(body: dict, data: dict, u: Usage, public_model: str) -> dict:
++    """Chat completion -> Response object."""
++    rb = ResponseBuilder(body, public_model)
++    ch = (data.get("choices") or [{}])[0]
++    msg = ch.get("message") or {}
++    out = []
++    r = msg.get("reasoning_content") or msg.get("reasoning")
++    if isinstance(r, str) and r:
++        out.append({"type": "reasoning", "id": _id("rs"), "summary": [{"type": "summary_text", "text": r}]})
++    if text := _text(msg.get("content")):
++        out.append({"type": "message", "id": _id("msg"), "status": "completed", "role": "assistant",
++                    "content": [{"type": "output_text", "text": text, "annotations": []}]})
++    for tc in msg.get("tool_calls") or []:
++        fn = tc.get("function") or {}
++        out.append(rb.call_item(tc.get("id") or _id("call"), fn.get("name") or "", fn.get("arguments") or ""))
++    status, inc = FINISH.get(ch.get("finish_reason"), ("completed", None))
++    return rb.envelope(status, out, u, incomplete=inc)
++
++
++def sse_event(e: tuple) -> bytes:
++    return f"event: {e[0]}\ndata: {json.dumps(e[1], ensure_ascii=False)}\n\n".encode()
++
++
++class ResponseStream(ResponseBuilder):
++    """Chat completion chunks in, Responses API events out as (type, payload)."""
++
++    def __init__(self, body: dict, public_model: str):
++        super().__init__(body, public_model)
++        self.seq, self.n = 0, 0           # event sequence number, next output index
++        self.items: dict[int, dict] = {}  # finished items by output index
++        self.cur = None                   # open text or reasoning item
++        self.calls: dict[int, dict] = {}  # open tool calls by chat tool index
++        self.finish_reason, self.chars = None, 0
++
++    def _ev(self, type_, **data):
++        self.seq += 1
++        return type_, {"type": type_, "sequence_number": self.seq, **data}
++
++    def start(self) -> list:
++        r = self.envelope("in_progress", [])
++        return [self._ev("response.created", response=r), self._ev("response.in_progress", response=r)]
++
++    def feed(self, chunk: dict) -> list:
++        out = []
++        for c in chunk.get("choices") or []:
++            d = c.get("delta") or {}
++            r = d.get("reasoning_content") or d.get("reasoning")
++            if isinstance(r, str) and r:
++                out += self._delta("reasoning", r)
++            if isinstance(d.get("content"), str) and d["content"]:
++                out += self._delta("text", d["content"])
++            for tc in d.get("tool_calls") or []:
++                out += self._tool(tc)
++            if c.get("finish_reason"):
++                self.finish_reason = c["finish_reason"]
++        return out
++
++    def _delta(self, kind, text):
++        out = []
++        if self.cur and self.cur["kind"] != kind:
++            out += self._close()
++        if not self.cur:
++            out += self._open(kind)
++        cur = self.cur
++        cur["buf"].append(text)
++        self.chars += len(text)
++        if kind == "text":
++            out.append(self._ev("response.output_text.delta", item_id=cur["id"], output_index=cur["idx"],
++                                content_index=0, delta=text))
++        else:
++            out.append(self._ev("response.reasoning_summary_text.delta", item_id=cur["id"], output_index=cur["idx"],
++                                summary_index=0, delta=text))
++        return out
++
++    def _open(self, kind):
++        idx, self.n = self.n, self.n + 1
++        if kind == "text":
++            self.cur = {"kind": kind, "idx": idx, "id": _id("msg"), "buf": []}
++            item = {"type": "message", "id": self.cur["id"], "status": "in_progress", "role": "assistant", "content": []}
++            return [self._ev("response.output_item.added", output_index=idx, item=item),
++                    self._ev("response.content_part.added", item_id=self.cur["id"], output_index=idx, content_index=0,
++                             part={"type": "output_text", "text": "", "annotations": []})]
++        self.cur = {"kind": kind, "idx": idx, "id": _id("rs"), "buf": []}
++        return [self._ev("response.output_item.added", output_index=idx,
++                         item={"type": "reasoning", "id": self.cur["id"], "summary": []}),
++                self._ev("response.reasoning_summary_part.added", item_id=self.cur["id"], output_index=idx,
++                         summary_index=0, part={"type": "summary_text", "text": ""})]
++
++    def _close(self):
++        cur, self.cur = self.cur, None
++        if not cur:
++            return []
++        text, i, iid = "".join(cur["buf"]), cur["idx"], cur["id"]
++        if cur["kind"] == "text":
++            part = {"type": "output_text", "text": text, "annotations": []}
++            item = {"type": "message", "id": iid, "status": "completed", "role": "assistant", "content": [part]}
++            evs = [self._ev("response.output_text.done", item_id=iid, output_index=i, content_index=0, text=text),
++                   self._ev("response.content_part.done", item_id=iid, output_index=i, content_index=0, part=part)]
++        else:
++            part = {"type": "summary_text", "text": text}
++            item = {"type": "reasoning", "id": iid, "summary": [part]}
++            evs = [self._ev("response.reasoning_summary_text.done", item_id=iid, output_index=i, summary_index=0, text=text),
++                   self._ev("response.reasoning_summary_part.done", item_id=iid, output_index=i, summary_index=0, part=part)]
++        self.items[i] = item
++        return evs + [self._ev("response.output_item.done", output_index=i, item=item)]
++
++    def _tool(self, tc):
++        out, fn = [], tc.get("function") or {}
++        k = tc.get("index")
++        if k is None:  # some providers send whole calls without an index
++            k = len(self.calls) if tc.get("id") or not self.calls else max(self.calls)
++        st = self.calls.get(k)
++        if st is None:
++            out += self._close()  # text before the tool calls is finished
++            idx, self.n = self.n, self.n + 1
++            st = self.calls[k] = {"idx": idx, "id": _id("fc"), "call_id": tc.get("id") or _id("call"),
++                                  "name": fn.get("name") or "", "args": []}
++            out.append(self._ev("response.output_item.added", output_index=idx,
++                                item=self.call_item(st["call_id"], st["name"], "", "in_progress", st["id"])))
++        elif fn.get("name") and not st["name"]:
++            st["name"] = fn["name"]
++        if a := fn.get("arguments"):
++            st["args"].append(a)
++            self.chars += len(a)
++            if st["name"] not in self.custom:
++                out.append(self._ev("response.function_call_arguments.delta", item_id=st["id"],
++                                    output_index=st["idx"], delta=a))
++        return out
++
++    def finish(self, u: Usage, error: str | None = None) -> list:
++        out = self._close()
++        for st in sorted(self.calls.values(), key=lambda s: s["idx"]):
++            args = "".join(st["args"])
++            item = self.call_item(st["call_id"], st["name"], args, "completed", st["id"])
++            if item["type"] == "function_call":
++                out.append(self._ev("response.function_call_arguments.done", item_id=st["id"],
++                                    output_index=st["idx"], arguments=args))
++            self.items[st["idx"]] = item
++            out.append(self._ev("response.output_item.done", output_index=st["idx"], item=item))
++        self.calls = {}
++        output = [self.items[i] for i in sorted(self.items)]
++        if error:
++            return out + [self._ev("response.failed", response=self.envelope(
++                "failed", output, u, error={"code": "server_error", "message": error}))]
++        status, inc = FINISH.get(self.finish_reason, ("completed", None))
++        return out + [self._ev("response.completed" if status == "completed" else "response.incomplete",
++                               response=self.envelope(status, output, u, incomplete=inc))]
+diff --git a/app/seo.py b/app/seo.py
+index 4da3163..a50714a 100644
+--- a/app/seo.py
++++ b/app/seo.py
+@@ -21,7 +21,7 @@ from .models import now
+ 
+ router = APIRouter(include_in_schema=False)
+ STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
+-ASSET_V = "22"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
++ASSET_V = "23"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
+ # Self-hosted (static/fonts): no third-party requests; the two Onest files cover the first paint of Russian text.
+ FONTS = ('<link rel="preload" href="/static/fonts/Onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>'
+          '<link rel="preload" href="/static/fonts/Onest-latin.woff2" as="font" type="font/woff2" crossorigin>'
+@@ -357,6 +357,10 @@ async def model_page(mid: str, request: Request, session: AsyncSession = Depends
+     facts = [("Вход, ₽/1M", rub(pin, c.rate) if pin else "—")]
+     if kind != "embedding":
+         facts.append(("Выход, ₽/1M", rub(pout, c.rate) if pout else "—"))
++    if m.get("price_cache_read") is not None:
++        facts.append(("Кеш: чтение, ₽/1M", rub(m["price_cache_read"], c.rate)))
++    if m.get("price_cache_write") is not None:
++        facts.append(("Кеш: запись, ₽/1M", rub(m["price_cache_write"], c.rate)))
+     facts.append(("Контекст", tokens(m["context_length"])))
+     if kind == "chat":
+         facts.append(("Макс. ответ", tokens(m["max_output"])))
+diff --git a/static/app.js b/static/app.js
+index fb962c8..5797978 100644
+--- a/static/app.js
++++ b/static/app.js
+@@ -153,10 +153,23 @@ function countUp(root) { $$('[data-count]', root).forEach(el => { const end = +e
+   const step = t => { const k = Math.min(1, (t - t0) / 1100), e = k === 1 ? 1 : 1 - Math.pow(2, -10 * k); el.textContent = k === 1 && orig !== '0' ? orig : fm(end * e); if (k < 1 && el.isConnected) requestAnimationFrame(step); }; requestAnimationFrame(step); }); }
+ 
+ // ---------- ready-made configs for popular apps
+-function integrations(base, origin, m, key, site) {
++function integrations(base, origin, m, key, site, ids = []) {
+   const li = a => `<ol class="steps-ol">${a.map(s => `<li>${s}</li>`).join('')}</ol>`, mono = v => `<span class="mono">${esc(v)}</span>`;
+   const slug = (site || 'gateway').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'gateway';
++  const pid = ['openai', 'ollama', 'lmstudio'].includes(slug) ? slug + '-gateway' : slug; // ids reserved by Codex
++  const envk = pid.toUpperCase().replace(/-/g, '_') + '_API_KEY';
++  const fast = ids.find(i => /haiku/i.test(i)) || m; // Claude Code sends background tasks to the Haiku slot
++  const step = (n, t) => `<ol class="steps-ol" start="${n}"><li>${t}</li></ol>`; // numbering continues across code blocks
+   return {
++    claude: { name: 'Claude Code', html: step(1, `Откройте ${mono('~/.claude/settings.json')} (на Windows ${mono('%USERPROFILE%\\.claude\\settings.json')}) и добавьте блок ${mono('env')}:`) +
++      codeBlock(JSON.stringify({ env: { ANTHROPIC_BASE_URL: origin, ANTHROPIC_AUTH_TOKEN: key, ANTHROPIC_MODEL: m, ANTHROPIC_DEFAULT_HAIKU_MODEL: fast, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' } }, null, 2)) +
++      step(2, `Запустите ${mono('claude')} и отправьте сообщение. Команда ${mono('/status')} покажет адрес шлюза, ${mono('/model')} — модели Claude из каталога.`) +
++      '<div class="alert info small mt">Claude Code работает в формате Anthropic, поэтому нужны модели Claude. Thinking, кеш промптов и подсчёт токенов поддерживаются: повторно прочитанный из кеша контекст стоит 10% от цены входа.</div>' },
++    codex: { name: 'Codex CLI', html: step(1, `Добавьте в ${mono('~/.codex/config.toml')}:`) +
++      codeBlock(`model = "${m}"\nmodel_provider = "${pid}"\n\n[model_providers.${pid}]\nname = "${site}"\nbase_url = "${base}"\nenv_key = "${envk}"\nwire_api = "responses"`) +
++      step(2, `Передайте ключ через переменную окружения (в PowerShell: ${mono(`$env:${envk}="${key}"`)}):`) + codeBlock(`export ${envk}=${key}`) +
++      step(3, `Запустите ${mono('codex')}.`) +
++      '<div class="alert info small mt">Подходит любая чат-модель каталога. Запросы к моделям не от OpenAI шлюз сам переводит из Responses API в их формат.</div>' },
+     cursor: { name: 'Cursor', html: li(['Откройте <b>Cursor Settings → Models</b>.', `В блоке <b>API Keys</b> вставьте ключ в поле <b>OpenAI API Key</b>: ${mono(key)}`, `Включите <b>Override OpenAI Base URL</b> и укажите ${mono(base)} ${copyBtn(base)}`, `Нажмите <b>+ Add Custom Model</b>, введите ${mono(m)} ${copyBtn(m)} и включите её.`, 'Нажмите <b>Verify</b>. Если проверка падает, временно отключите в списке остальные модели.']) +
+       '<div class="alert warn small mt">Cursor ходит к API через свои серверы, поэтому шлюз должен быть доступен из интернета по HTTPS. Адрес localhost работать не будет.</div>' },
+     continue: { name: 'Continue', html: li(['Откройте панель Continue → шестерёнка → <b>Open config file</b> (файл <span class="mono">~/.continue/config.yaml</span>).', 'Добавьте модель в раздел <span class="mono">models</span> и сохраните файл:']) +
+@@ -391,7 +404,7 @@ function waitPay(id, url) {
+ 
+ route('/logs', async (el) => {
+   let off = 0; const load = async () => { const logs = await api(`/api/me/logs?limit=50&offset=${off}`);
+-    el.innerHTML = pageHead('История запросов', 'Каждый запрос к API и его стоимость') + (logs.length || off ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Модель</th><th>Endpoint</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Стоимость</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${logs.map(l => `<tr><td class="muted">${dt(l.created_at)}</td><td class="mono">${esc(l.model)}</td><td class="small muted">${esc(l.endpoint)}${l.stream ? ' · stream' : ''}</td><td class="r num">${nf(l.prompt_tokens)}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${money(l.price)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td title="${esc(l.error || '')}">${statusBadge(l.status_code)}${l.error ? ` <span class="small muted">${esc(l.error)}</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
++    el.innerHTML = pageHead('История запросов', 'Каждый запрос к API и его стоимость') + (logs.length || off ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Модель</th><th>Endpoint</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Стоимость</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${logs.map(l => `<tr><td class="muted">${dt(l.created_at)}</td><td class="mono">${esc(l.model)}</td><td class="small muted">${esc(l.endpoint)}${l.stream ? ' · stream' : ''}</td><td class="r num">${nf(l.prompt_tokens)}${l.cached_tokens ? `<div class="small dim">из кеша ${nf(l.cached_tokens)}</div>` : ''}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${money(l.price)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td title="${esc(l.error || '')}">${statusBadge(l.status_code)}${l.error ? ` <span class="small muted">${esc(l.error)}</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
+       <div class="row mt"><button class="btn sm" id="pv" ${off ? '' : 'disabled'}>← Назад</button><button class="btn sm" id="nx" ${logs.length < 50 ? 'disabled' : ''}>Далее →</button></div>` : `<div class="card">${empty('list', 'Запросов пока нет', 'Здесь появится история обращений к API')}</div>`);
+     const pv = $('#pv'), nx = $('#nx'); if (pv) { pv.onclick = () => { off -= 50; load(); }; nx.onclick = () => { off += 50; load(); }; } };
+   el.innerHTML = skel(1, 300); load().catch(fail);
+@@ -403,16 +416,16 @@ route('/docs', async (el) => {
+     python: `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${base}",\n    api_key="sk-gw-...",\n)\n\nstream = client.chat.completions.create(\n    model="claude-sonnet-4-5",\n    messages=[{"role": "user", "content": "Напиши хайку"}],\n    stream=True,\n)\nfor chunk in stream:\n    print(chunk.choices[0].delta.content or "", end="")`,
+     js: `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "${base}",\n  apiKey: "sk-gw-...",\n});\n\nconst r = await client.chat.completions.create({\n  model: "gpt-4o",\n  messages: [{ role: "user", content: "Привет!" }],\n});\nconsole.log(r.choices[0].message.content);`,
+     anthropic: `import anthropic\n\nclient = anthropic.Anthropic(\n    base_url="${location.origin}",\n    api_key="sk-gw-...",\n)\nmsg = client.messages.create(\n    model="claude-sonnet-4-5",\n    max_tokens=1024,\n    messages=[{"role": "user", "content": "Привет!"}],\n)\nprint(msg.content[0].text)` };
+-  const cms = (await api('/api/public/models').catch(() => [])).filter(m => m.kind === 'chat'); let app = 'cursor', im = cms[0]?.id || 'gpt-4o-mini', ik = '';
++  const cms = (await api('/api/public/models').catch(() => [])).filter(m => m.kind === 'chat'); let app = 'claude', im = cms[0]?.id || 'gpt-4o-mini', ik = '';
+   el.innerHTML = pageHead('Документация', 'API совместим с OpenAI и Anthropic') + `<div class="grid" style="grid-template-columns:220px minmax(0,1fr)"><div class="card" style="height:fit-content;position:sticky;top:76px"><div class="col small"><a href="#/docs" data-s="s1">Быстрый старт</a><a href="#/docs" data-s="s2">Эндпоинты</a><a href="#/docs" data-s="s3">Ошибки</a><a href="#/docs" data-s="s4">Готовые настройки</a></div></div><div class="col">
+     <div class="card" id="s1"><h3>Быстрый старт</h3><p class="muted">Base URL: <span class="mono">${base}</span> ${copyBtn(base)}</p><div class="pills mb" id="lt">${Object.keys(ex).map((k, i) => `<button class="${i ? '' : 'on'}" data-l="${k}">${{ curl: 'curl', python: 'Python', js: 'JavaScript', anthropic: 'Anthropic SDK' }[k]}</button>`).join('')}</div><div id="lc">${codeBlock(ex.curl)}</div></div>
+-    <div class="card" id="s2"><h3>Эндпоинты</h3><div class="tbl-wrap mt"><table><tbody>${[['POST', '/v1/chat/completions', 'Чат (OpenAI-формат), поддерживает stream, tools, vision'], ['POST', '/v1/messages', 'Anthropic Messages API (для моделей Claude)'], ['POST', '/v1/embeddings', 'Эмбеддинги'], ['GET', '/v1/models', 'Список доступных моделей'], ['GET', '/v1/balance', 'Баланс и расход ключа']].map(([m, p, d]) => `<tr><td><span class="badge ${m === 'GET' ? 'ok' : 'info'}">${m}</span></td><td class="mono">${p}</td><td class="muted">${d}</td></tr>`).join('')}</tbody></table></div>
++    <div class="card" id="s2"><h3>Эндпоинты</h3><div class="tbl-wrap mt"><table><tbody>${[['POST', '/v1/chat/completions', 'Чат (OpenAI-формат), поддерживает stream, tools, vision'], ['POST', '/v1/responses', 'OpenAI Responses API: на нём работает Codex CLI'], ['POST', '/v1/messages', 'Anthropic Messages API (для моделей Claude)'], ['POST', '/v1/messages/count_tokens', 'Подсчёт токенов запроса без списания (Claude Code)'], ['POST', '/v1/embeddings', 'Эмбеддинги'], ['GET', '/v1/models', 'Список доступных моделей'], ['GET', '/v1/balance', 'Баланс и расход ключа']].map(([m, p, d]) => `<tr><td><span class="badge ${m === 'GET' ? 'ok' : 'info'}">${m}</span></td><td class="mono">${p}</td><td class="muted">${d}</td></tr>`).join('')}</tbody></table></div>
+       <p class="small muted mt">Заголовки ответа: <span class="mono">X-Request-ID</span> — ID запроса для поддержки, <span class="mono">X-Cost</span> — стоимость запроса в USD.</p></div>
+     <div class="card" id="s3"><h3>Ошибки</h3><div class="tbl-wrap mt"><table><tbody>${[[401, 'Неверный или отключённый ключ'], [402, 'Недостаточно средств или исчерпан лимит ключа'], [404, 'Модель не найдена'], [429, 'Превышен лимит запросов в минуту'], [400, 'Ошибка в запросе: в тексте ошибки написано, что исправить'], [502, 'Провайдер временно недоступен — повторите запрос'], [503, 'Модель временно недоступна']].map(([c, d]) => `<tr><td>${statusBadge(c)}</td><td class="muted">${d}</td></tr>`).join('')}</tbody></table></div><p class="small muted mt">Все ошибки приходят в формате OpenAI: <span class="mono">{"error": {"message": "...", "code": "..."}}</span>. В message — понятное описание на русском и, если нужно, ссылка на нужный раздел кабинета.</p></div>
+     <div class="card" id="s4"><h3>Готовые настройки для программ</h3><p class="muted">Base URL и модель уже подставлены. Можно вставить свой ключ: он нужен только для подстановки в примеры и никуда не отправляется.</p>
+       <div class="grid g2 mb"><div class="field"><label>Модель</label><select class="inp" id="im">${cms.map(m => `<option>${esc(m.id)}</option>`).join('')}</select></div><div class="field"><label>Ваш API-ключ (необязательно)</label><input class="inp mono" id="ik" placeholder="sk-gw-..." autocomplete="off"></div></div>
+       <div class="pills mb" id="it" style="flex-wrap:wrap"></div><div id="ib"></div></div></div></div>`;
+-  const drawI = () => { const all = integrations(base, location.origin, im, ik || 'sk-gw-...', S.cfg.site_name || 'Gateway');
++  const drawI = () => { const all = integrations(base, location.origin, im, ik || 'sk-gw-...', S.cfg.site_name || 'Gateway', cms.map(x => x.id));
+     $('#it').innerHTML = Object.entries(all).map(([k, v]) => `<button class="${k === app ? 'on' : ''}" data-app="${k}">${v.name}</button>`).join(''); $('#ib').innerHTML = all[app].html;
+     $$('[data-app]').forEach(b => b.onclick = () => { app = b.dataset.app; drawI(); }); };
+   $('#im').onchange = e => { im = e.target.value; drawI(); }; $('#ik').oninput = e => { ik = e.target.value.trim(); drawI(); }; drawI();
+@@ -675,6 +688,7 @@ function modelEditor(m, ps, done) {
+     <div class="field"><label>Описание</label><input class="inp" name="description" value="${esc(m.description)}"></div>
+     <div class="grid g4"><div class="field"><label>Себестоимость вход $/1M</label><input class="inp" type="number" step="any" name="cost_in" value="${m.cost_in}"></div><div class="field"><label>Себестоимость выход $/1M</label><input class="inp" type="number" step="any" name="cost_out" value="${m.cost_out}"></div>
+       <div class="field"><label>Продажа вход $/1M</label><input class="inp" type="number" step="any" name="price_in" value="${m.price_in ?? ''}" placeholder="авто"></div><div class="field"><label>Продажа выход $/1M</label><input class="inp" type="number" step="any" name="price_out" value="${m.price_out ?? ''}" placeholder="авто"></div></div>
++    <div class="grid g2"><div class="field"><label>Кеш: чтение, доля цены входа</label><input class="inp" type="number" step="any" min="0" name="cache_read_mult" value="${m.cache_read_mult ?? ''}" placeholder="авто: 0.1 Anthropic, 0.5 остальные"></div><div class="field"><label>Кеш: запись, доля цены входа</label><input class="inp" type="number" step="any" min="0" name="cache_write_mult" value="${m.cache_write_mult ?? ''}" placeholder="авто: 1.25 Anthropic, 1 остальные"></div></div>
+     <div class="row wrap"><label class="chk"><input type="checkbox" name="supports_vision" ${m.supports_vision ? 'checked' : ''}>Vision</label><label class="chk"><input type="checkbox" name="supports_tools" ${m.supports_tools ? 'checked' : ''}>Tools</label><label class="chk"><input type="checkbox" name="is_enabled" ${m.is_enabled ? 'checked' : ''}>Включена</label></div>
+     <div><div class="row between"><h3>Маршрутизация</h3><button type="button" class="btn sm" id="radd">${ic('plus')}Маршрут</button></div><p class="small muted" style="margin:4px 0 10px">Порядок = приоритет. При ошибке запрос уходит на следующий маршрут.</p><div class="col" id="rl"></div></div></form>`,
+     { size: 'lg', foot: `${isNew ? '' : `<button class="btn danger" id="mdel" style="margin-right:auto">${ic('trash')}Удалить</button>`}<button class="btn" data-c>Отмена</button><button class="btn pri" id="msave">Сохранить</button>` });
+@@ -685,7 +699,7 @@ function modelEditor(m, ps, done) {
+   md.querySelector('[data-c]').onclick = md.close;
+   if (!isNew) $('#mdel', md).onclick = async () => { if (await confirmBox('Удалить модель?', { ok: 'Удалить' })) { await api('/api/admin/models/' + m.id, { method: 'DELETE' }); md.close(); toast('Удалено'); done(); } };
+   $('#msave', md).onclick = e => { const f = $('#mf', md); if (!f.reportValidity()) return; const d = Object.fromEntries(new FormData(f));
+-    const body = { ...d, context_length: +d.context_length, max_output: +d.max_output, cost_in: +d.cost_in || 0, cost_out: +d.cost_out || 0, price_in: d.price_in === '' ? null : +d.price_in, price_out: d.price_out === '' ? null : +d.price_out, supports_vision: !!d.supports_vision, supports_tools: !!d.supports_tools, is_enabled: !!d.is_enabled, routes: routes.filter(r => r.upstream_model.trim()) };
++    const body = { ...d, context_length: +d.context_length, max_output: +d.max_output, cost_in: +d.cost_in || 0, cost_out: +d.cost_out || 0, price_in: d.price_in === '' ? null : +d.price_in, price_out: d.price_out === '' ? null : +d.price_out, cache_read_mult: d.cache_read_mult === '' ? null : +d.cache_read_mult, cache_write_mult: d.cache_write_mult === '' ? null : +d.cache_write_mult, supports_vision: !!d.supports_vision, supports_tools: !!d.supports_tools, is_enabled: !!d.is_enabled, routes: routes.filter(r => r.upstream_model.trim()) };
+     busy(e.currentTarget, async () => { await api(isNew ? '/api/admin/models' : '/api/admin/models/' + m.id, { method: isNew ? 'POST' : 'PUT', body }); toast('Сохранено'); md.close(); done(); }); };
+ }
+ 
+@@ -742,7 +756,7 @@ route('/admin/transactions', async (el) => {
+ route('/admin/logs', async (el, p, q) => {
+   const f = { q: q.q || '', model: q.model || '', status: q.status || '' }; let off = 0, rows = [];
+   const load = async () => { rows = await api(`/api/admin/logs?q=${encodeURIComponent(f.q)}&model=${encodeURIComponent(f.model)}&status=${f.status}&offset=${off}`);
+-    $('#lt').innerHTML = rows.length ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Пользователь</th><th>Модель</th><th>Провайдер</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Цена</th><th class="r">Прибыль</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${rows.map((l, i) => `<tr class="click" data-i="${i}"><td class="muted">${dt(l.created_at)}</td><td>${esc(l.email || '—')}</td><td class="mono">${esc(l.model)}</td><td>${esc(l.provider)}${l.attempts > 1 ? ` <span class="badge warn" title="fallback">×${l.attempts}</span>` : ''}</td><td class="r num">${nf(l.prompt_tokens)}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${money(l.price)}</td><td class="r num ok">${money(l.profit)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td>${statusBadge(l.status_code)}</td></tr>`).join('')}</tbody></table></div>
++    $('#lt').innerHTML = rows.length ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Пользователь</th><th>Модель</th><th>Провайдер</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Цена</th><th class="r">Прибыль</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${rows.map((l, i) => `<tr class="click" data-i="${i}"><td class="muted">${dt(l.created_at)}</td><td>${esc(l.email || '—')}</td><td class="mono">${esc(l.model)}</td><td>${esc(l.provider)}${l.attempts > 1 ? ` <span class="badge warn" title="fallback">×${l.attempts}</span>` : ''}</td><td class="r num">${nf(l.prompt_tokens)}${l.cached_tokens ? `<div class="small dim">из кеша ${nf(l.cached_tokens)}</div>` : ''}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${money(l.price)}</td><td class="r num ok">${money(l.profit)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td>${statusBadge(l.status_code)}</td></tr>`).join('')}</tbody></table></div>
+       <div class="row mt"><button class="btn sm" id="pv" ${off ? '' : 'disabled'}>←</button><button class="btn sm" id="nx" ${rows.length < 100 ? 'disabled' : ''}>→</button></div>` : `<div class="card">${empty('list', 'Логов нет')}</div>`;
+     $$('[data-i]').forEach(t => t.onclick = () => { const l = rows[t.dataset.i];
+       modal('Запрос ' + esc(l.request_id), `<div class="col">${[['Время', dt(l.created_at)], ['Пользователь', esc(l.email || '—')], ['IP', esc(l.ip)], ['Модель', `<span class="mono">${esc(l.model)}</span>`], ['Endpoint', esc(l.endpoint) + (l.stream ? ' (stream)' : '')], ['Провайдер', esc(l.provider) + ` · ключ #${l.provider_key_id ?? '—'}`], ['Попыток (fallback)', l.attempts], ['Токены', `${nf(l.prompt_tokens)} → ${nf(l.completion_tokens)}`], ['Себестоимость', money(l.cost)], ['Цена', money(l.price)], ['Прибыль', `<span class="ok">${money(l.profit)}</span>`], ['Задержка', l.latency_ms + ' мс'], ['Статус', statusBadge(l.status_code)]]
+diff --git a/static/i18n.js b/static/i18n.js
+index 54b3edf..023df32 100644
+--- a/static/i18n.js
++++ b/static/i18n.js
+@@ -955,6 +955,25 @@
+ "В каталоге": "In the catalog",
+ "Попробуйте на своём коде": "Try it with your own code",
+ "Нужно заменить только адрес API и ключ.": "Only the API URL and key need to change.",
++"OpenAI Responses API: на нём работает Codex CLI": "OpenAI Responses API, used by Codex CLI",
++"Подсчёт токенов запроса без списания (Claude Code)": "Count request tokens, free of charge (Claude Code)",
++"(на Windows": "(on Windows",
++"и добавьте блок": "and add the block",
++"Запустите": "Run",
++"и отправьте сообщение. Команда": "and send a message. The command",
++"покажет адрес шлюза,": "shows the gateway URL,",
++"— модели Claude из каталога.": "lists the Claude models from the catalog.",
++"Claude Code работает в формате Anthropic, поэтому нужны модели Claude. Thinking, кеш промптов и подсчёт токенов поддерживаются: повторно прочитанный из кеша контекст стоит 10% от цены входа.": "Claude Code uses the Anthropic format, so pick Claude models. Thinking, prompt caching and token counting are supported: context read back from the cache costs 10% of the input price.",
++"Добавьте в": "Add to",
++"Передайте ключ через переменную окружения (в PowerShell:": "Pass the key in an environment variable (in PowerShell:",
++"Подходит любая чат-модель каталога. Запросы к моделям не от OpenAI шлюз сам переводит из Responses API в их формат.": "Any chat model from the catalog works. For non-OpenAI models the gateway translates Responses API requests into their format.",
++"Кеш: чтение, доля цены входа": "Cache read, share of input price",
++"Кеш: запись, доля цены входа": "Cache write, share of input price",
++"авто: 0.1 Anthropic, 0.5 остальные": "auto: 0.1 Anthropic, 0.5 others",
++"авто: 1.25 Anthropic, 1 остальные": "auto: 1.25 Anthropic, 1 others",
++"из кеша": "cached",
++"Кеш: чтение, ₽/1M": "Cache read, ₽/1M",
++"Кеш: запись, ₽/1M": "Cache write, ₽/1M",
+ };
+   const CYR = /[А-Яа-яЁё]/;
+   const SKIP = 'script,style,textarea,input,pre,code,.code,.term,.tk-b,.msg,.att-n,.keybox,[data-noi18n]';
+diff --git a/tests/agents_test.py b/tests/agents_test.py
+new file mode 100644
+index 0000000..2b8053e
+--- /dev/null
++++ b/tests/agents_test.py
+@@ -0,0 +1,211 @@
++"""Run after e2e.py against the same server: what Claude Code and Codex CLI need from the gateway —
++anthropic-* headers and body fields passed through, count_tokens, prompt-cache billing, /v1/responses."""
++import json
++import time
++from decimal import ROUND_CEILING, Decimal
++
++import httpx
++
++B, U = "http://127.0.0.1:8000", "http://127.0.0.1:9001"
++NANO = 10 ** 9
++c = httpx.Client(base_url=B, timeout=30)
++
++
++def ok(r):
++    assert r.status_code < 400, (r.request.url, r.status_code, r.text)
++    return r
++
++
++def last(name):
++    return httpx.get(f"{U}/_last/{name}").json()
++
++
++def nano(m, tin, tout, cr=0, cw=0, cw1h=0, rm=1, wm=1):
++    """Expected charge, same rule as billing.calc_usage."""
++    d = lambda x: Decimal(str(x))
++    w = d(tin - cr - cw - cw1h) + d(cr) * d(rm) + d(cw) * d(wm) + d(cw1h) * d(2.0)
++    v = (w * d(m["eff_price_in"]) + d(tout) * d(m["eff_price_out"])) / Decimal(1_000_000) * NANO
++    return int(v.to_integral_value(rounding=ROUND_CEILING))
++
++
++def xcost(n):
++    return f"{round(n / NANO, 9):.9f}"
++
++
++def log_of(rid):
++    for _ in range(30):  # streamed requests are billed in the background
++        for row in ok(c.get("/api/me/logs?limit=50", headers=UH)).json():
++            if row["request_id"] == rid:
++                return row
++        time.sleep(0.1)
++    raise AssertionError(f"no log for {rid}")
++
++
++def events(lines):
++    """SSE lines -> payloads; every data line must follow an event line of the same type."""
++    out, ev = [], None
++    for line in lines:
++        if line.startswith("event:"):
++            ev = line[6:].strip()
++        elif line.startswith("data:"):
++            d = json.loads(line[5:])
++            assert d["type"] == ev, (ev, d["type"])
++            out.append(d)
++    return out
++
++
++A = {"Authorization": "Bearer " + ok(c.post("/api/auth/login", json={"email": "admin@test.io", "password": "adminpass123"})).json()["token"]}
++UH = {"Authorization": "Bearer " + ok(c.post("/api/auth/login", json={"email": "user@test.io", "password": "userpass123"})).json()["token"]}
++key = ok(c.post("/api/me/keys", headers=UH, json={"name": "agents"})).json()["key"]
++K = {"Authorization": f"Bearer {key}"}
++models = lambda: {m["public_id"]: m for m in ok(c.get("/api/admin/models", headers=A)).json()}
++M = models()
++cl, mini = M["claude-sonnet-4-5"], M["gpt-4o-mini"]
++
++# ---------------------------------------------------------------- Claude Code
++beta = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
++cc = {"model": "claude-sonnet-4-5", "max_tokens": 64, "thinking": {"type": "enabled", "budget_tokens": 1024},
++      "system": [{"type": "text", "text": "CACHE me", "cache_control": {"type": "ephemeral"}}],
++      "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]}
++r = ok(c.post("/v1/messages?beta=true", headers={"x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-beta": beta}, json=cc))
++up = last("an")
++assert up["headers"]["anthropic-beta"] == beta and up["headers"]["anthropic-version"] == "2023-06-01", up["headers"]
++assert up["headers"]["x-api-key"] == "sk-up-anthropic" and up["body"]["model"] == "claude-sonnet-4-5-20250929"
++assert all(up["body"][k] == cc[k] for k in ("thinking", "system", "messages")), up["body"]
++# 100 plain + 9000 read (10%) + 600 written for 5 min (125%) + 400 written for 1 h (200%)
++want, full = nano(cl, 10100, 50, cr=9000, cw=600, cw1h=400, rm=0.1, wm=1.25), nano(cl, 10100, 50)
++assert r.headers["x-cost"] == xcost(want) and want * 3 < full, (r.headers["x-cost"], xcost(want), xcost(full))
++row = log_of(r.headers["x-request-id"])
++assert (row["prompt_tokens"], row["cached_tokens"], row["cache_write_tokens"]) == (10100, 9000, 1000), row
++assert abs(row["price"] - want / NANO) < 1e-9
++print("claude code: headers and body passed through, cache billed", xcost(want), "instead of", xcost(full))
++
++with c.stream("POST", "/v1/messages", headers={"Authorization": f"Bearer {key}", "anthropic-beta": beta}, json={**cc, "stream": True}) as s:
++    assert s.status_code == 200, s.read()
++    rid, text = s.headers["x-request-id"], "".join(s.iter_text())
++assert '"model": "claude-sonnet-4-5"' in text and "Hello" in text
++row = log_of(rid)
++assert (row["cached_tokens"], row["completion_tokens"]) == (9000, 5) and abs(row["price"] - nano(cl, 10100, 5, 9000, 600, 400, 0.1, 1.25) / NANO) < 1e-9, row
++
++bal = ok(c.get("/v1/balance", headers=K)).json()["balance_usd"]
++r = ok(c.post("/v1/messages/count_tokens", headers={"x-api-key": key, "anthropic-beta": beta},
++              json={"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "hi"}]}))
++assert r.json() == {"input_tokens": 42} and last("an_count")["body"]["model"] == "claude-sonnet-4-5-20250929"
++assert last("an_count")["headers"]["anthropic-beta"] == beta
++assert ok(c.get("/v1/balance", headers=K)).json()["balance_usd"] == bal, "count_tokens must be free"
++r = c.post("/v1/messages/count_tokens", headers={"x-api-key": key}, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]})
++assert r.status_code == 400 and r.json()["type"] == "error", r.text
++assert any(m["id"] == "claude-sonnet-4-5" and m["display_name"] for m in ok(c.get("/v1/models?limit=1000")).json()["data"])
++assert c.head("/api/hello").status_code == 200
++print("claude code: count_tokens free, model discovery, connection probe")
++
++# ---------------------------------------------------------------- OpenAI-style cache, per-model override
++r = ok(c.post("/v1/chat/completions", headers=K, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "CACHE hi"}]}))
++assert r.headers["x-cost"] == xcost(nano(mini, 1000, 500, cr=800, rm=0.5)), r.headers["x-cost"]
++assert r.json()["usage"]["prompt_tokens_details"]["cached_tokens"] == 800
++body = {k: mini[k] for k in ("public_id", "display_name", "description", "family", "kind", "context_length", "max_output",
++                             "supports_vision", "supports_tools", "is_enabled", "cost_in", "cost_out", "price_in", "price_out")}
++body["routes"] = [{"provider_id": x["provider_id"], "upstream_model": x["upstream_model"]} for x in mini["routes"]]
++ok(c.put(f"/api/admin/models/{mini['id']}", headers=A, json={**body, "cache_read_mult": 0.1}))
++try:
++    assert models()["gpt-4o-mini"]["cache_read_mult"] == 0.1
++    r = ok(c.post("/v1/chat/completions", headers=K, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "CACHE hi"}]}))
++    assert r.headers["x-cost"] == xcost(nano(mini, 1000, 500, cr=800, rm=0.1)), r.headers["x-cost"]
++    pub = {m["id"]: m for m in ok(c.get("/api/public/models")).json()}
++    assert abs(pub["gpt-4o-mini"]["price_cache_read"] - mini["eff_price_in"] * 0.1) < 1e-6
++finally:
++    ok(c.put(f"/api/admin/models/{mini['id']}", headers=A, json={**body, "cache_read_mult": None}))
++pub = {m["id"]: m for m in ok(c.get("/api/public/models")).json()}
++assert abs(pub["claude-sonnet-4-5"]["price_cache_read"] - cl["eff_price_in"] * 0.1) < 1e-6
++assert abs(pub["claude-sonnet-4-5"]["price_cache_write"] - cl["eff_price_in"] * 1.25) < 1e-6
++assert pub["text-embedding-3-small"]["price_cache_read"] is None
++assert "Кеш: чтение" in ok(c.get("/models/claude-sonnet-4-5")).text
++r = c.put(f"/api/admin/models/{mini['id']}", headers=A, json={**body, "cache_read_mult": -1})
++assert r.status_code == 422, r.status_code
++print("cache: OpenAI cached_tokens at 50% by default, admin override, public cache prices")
++
++# ---------------------------------------------------------------- Codex: /v1/responses passed through to OpenAI
++r = ok(c.post("/v1/responses", headers=K, json={"model": "gpt-4o-mini", "input": "hi", "store": False, "include": ["reasoning.encrypted_content"]}))
++d = r.json()
++assert d["model"] == "gpt-4o-mini" and d["output"][0]["content"][0]["text"] == "resp:gpt-4o-mini", d
++assert last("oa_resp")["body"]["include"] == ["reasoning.encrypted_content"] and last("oa_resp")["body"]["store"] is False
++assert r.headers["x-cost"] == xcost(nano(mini, 1200, 30, cr=1000, rm=0.5)), r.headers["x-cost"]
++assert ok(c.post("/v1/responses", headers=K, json={"model": "gpt-4o", "input": "hi"})).json()["output"][0]["content"][0]["text"] == "resp:gpt-4o"
++with c.stream("POST", "/v1/responses", headers=K, json={"model": "gpt-4o-mini", "input": "hi", "stream": True}) as s:
++    assert s.status_code == 200, s.read()
++    rid, evs = s.headers["x-request-id"], events(list(s.iter_lines()))
++assert evs[-1]["type"] == "response.completed" and evs[-1]["response"]["model"] == "gpt-4o-mini"
++row = log_of(rid)
++assert (row["endpoint"], row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == ("responses", 1200, 1000, 30), row
++print("codex: native Responses API passthrough, fallback, streaming, cached tokens")
++
++# ---------------------------------------------------------------- Codex: /v1/responses over Chat Completions
++pc = ok(c.post("/api/admin/providers", headers=A, json={"name": "Compat", "preset": "custom", "type": "openai_compatible",
++                                                       "base_url": U + "/oa/v1", "priority": 5, "api_keys": ["sk-up-compat"]})).json()
++ok(c.post("/api/admin/models", headers=A, json={"public_id": "compat-chat", "display_name": "Compat chat", "family": "Compat",
++                                                "cost_in": 1, "cost_out": 2, "routes": [{"provider_id": pc["id"], "upstream_model": "gpt-4o-mini"}]}))
++cm = models()["compat-chat"]
++codex = {"model": "compat-chat", "instructions": "You are Codex.", "store": False, "parallel_tool_calls": False, "tool_choice": "auto",
++         "reasoning": {"effort": "medium", "summary": "auto"}, "include": ["reasoning.encrypted_content"], "prompt_cache_key": "s1",
++         "tools": [{"type": "function", "name": "shell", "description": "Run a command", "strict": False,
++                    "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]}},
++                   {"type": "custom", "name": "apply_patch", "description": "Edit files",
++                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: begin_patch"}},
++                   {"type": "web_search"}],
++         "input": [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions>"}]},
++                   {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "list files"}]},
++                   {"type": "reasoning", "summary": [], "encrypted_content": None},
++                   {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Looking."}]},
++                   {"type": "function_call", "name": "shell", "arguments": "{\"command\":[\"pwd\"]}", "call_id": "call_a"},
++                   {"type": "function_call_output", "call_id": "call_a", "output": "/repo"},
++                   {"type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch", "call_id": "call_b"},
++                   {"type": "custom_tool_call_output", "call_id": "call_b", "output": "Done"},
++                   {"type": "function_call_output", "call_id": "call_orphan", "output": "orphan"},
++                   {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "and now?"}]}]}
++r = ok(c.post("/v1/responses", headers=K, json=codex))
++sent, d = last("oa_chat")["body"], r.json()
++assert [m["role"] for m in sent["messages"]] == ["system", "system", "user", "assistant", "tool", "assistant", "tool", "user"], sent["messages"]
++assert sent["messages"][0]["content"] == "You are Codex." and sent["messages"][3]["content"] == "Looking."
++assert sent["messages"][3]["tool_calls"][0]["function"] == {"name": "shell", "arguments": "{\"command\":[\"pwd\"]}"}
++assert json.loads(sent["messages"][5]["tool_calls"][0]["function"]["arguments"]) == {"input": "*** Begin Patch"}
++assert [t["function"]["name"] for t in sent["tools"]] == ["shell", "apply_patch"] and "start: begin_patch" in sent["tools"][1]["function"]["description"]
++assert sent["model"] == "gpt-4o-mini" and not {"input", "reasoning", "store", "include", "prompt_cache_key"} & set(sent), sent.keys()
++fc = d["output"][0]
++assert d["object"] == "response" and d["status"] == "completed" and d["model"] == "compat-chat", d
++assert (fc["type"], fc["name"], fc["call_id"], fc["arguments"]) == ("function_call", "shell", "call_1", '{"cmd":"ls"}'), fc
++assert d["usage"]["input_tokens"] == 1000 and r.headers["x-cost"] == xcost(nano(cm, 1000, 500))
++
++with c.stream("POST", "/v1/responses", headers=K, json={"model": "compat-chat", "input": "hi", "stream": True}) as s:
++    evs = events(list(s.iter_lines()))
++types = [e["type"] for e in evs]
++assert types[:4] == ["response.created", "response.in_progress", "response.output_item.added", "response.content_part.added"], types
++assert types[-4:] == ["response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"], types
++assert "".join(e["delta"] for e in evs if e["type"] == "response.output_text.delta") == "Привет, мир"
++assert [e["sequence_number"] for e in evs] == list(range(1, len(evs) + 1))
++done = evs[-1]["response"]
++assert done["output"][0]["content"][0]["text"] == "Привет, мир" and (done["usage"]["input_tokens"], done["usage"]["output_tokens"]) == (10, 3)
++
++with c.stream("POST", "/v1/responses", headers=K, json={**codex, "stream": True}) as s:
++    rid, evs = s.headers["x-request-id"], events(list(s.iter_lines()))
++assert "".join(e["delta"] for e in evs if e["type"] == "response.function_call_arguments.delta") == '{"cmd":"ls"}'
++item = [e for e in evs if e["type"] == "response.output_item.done"][-1]["item"]
++assert (item["type"], item["call_id"], item["arguments"]) == ("function_call", "call_1", '{"cmd":"ls"}'), item
++assert evs[-1]["type"] == "response.completed" and evs[-1]["response"]["output"] == [item]
++assert log_of(rid)["completion_tokens"] == 8
++
++r = c.post("/v1/responses", headers=K, json={"model": "compat-chat", "input": "hi", "previous_response_id": "resp_old"})
++assert r.status_code == 400 and r.json()["error"]["code"] == "unsupported_field", r.text
++print("codex: Responses over Chat Completions — history, tools, custom tools, streaming text and tool calls")
++
++# ---------------------------------------------------------------- Codex: /v1/responses over Anthropic
++r = ok(c.post("/v1/responses", headers=K, json={"model": "claude-sonnet-4-5", "instructions": "be brief", "input": [{"role": "user", "content": "hi"}]}))
++assert r.json()["output"][0]["content"][0]["text"] == "sys=be brief" and last("an")["body"]["system"] == "be brief"
++d = ok(c.post("/v1/responses", headers=K, json={"model": "claude-sonnet-4-5", "input": "weather?", "tools": codex["tools"][:1]})).json()
++assert [o["type"] for o in d["output"]] == ["message", "function_call"] and json.loads(d["output"][1]["arguments"]) == {"city": "Moscow"}
++with c.stream("POST", "/v1/responses", headers=K, json={"model": "claude-sonnet-4-5", "input": "hi", "stream": True}) as s:
++    evs = events(list(s.iter_lines()))
++assert "".join(e["delta"] for e in evs if e["type"] == "response.output_text.delta") == "Hello world"
++assert evs[-1]["type"] == "response.completed" and evs[-1]["response"]["usage"]["input_tokens"] == 20
++print("codex: Responses over Anthropic Messages")
++
++print("AGENTS OK")
+diff --git a/tests/mock_upstream.py b/tests/mock_upstream.py
+index 5162fc8..4e11307 100644
+--- a/tests/mock_upstream.py
++++ b/tests/mock_upstream.py
+@@ -5,6 +5,19 @@ from fastapi.responses import JSONResponse, StreamingResponse
+ 
+ app = FastAPI()
+ FAIL = {"n": 0}
++LAST = {}  # last request per endpoint, for tests that check what the gateway forwarded
++# prompt-cache usage, returned when the request contains the word CACHE
++AN_CACHED = {"input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 1000,
++             "cache_creation": {"ephemeral_5m_input_tokens": 600, "ephemeral_1h_input_tokens": 400}}
++
++
++def has(b, key, word="CACHE"):
++    return word in json.dumps(b.get(key), ensure_ascii=False)
++
++
++@app.get("/_last/{name}")
++async def last(name: str):
++    return LAST.get(name) or {}
+ 
+ 
+ @app.get("/oa/v1/models")
+@@ -26,18 +39,76 @@ async def bad_chat():
+ async def oa_chat(req: Request):
+     b = await req.json()
+     assert req.headers["authorization"].startswith("Bearer sk-up")
++    LAST["oa_chat"] = {"headers": dict(req.headers), "body": b}
++    # calls the tool on a user turn and answers in text once the tool result is back, like a real model
++    names = [(t.get("function") or {}).get("name") for t in b.get("tools") or []]
++    tool = next((n for n in ("shell", "exec_command") if n in names), None) if b["messages"][-1]["role"] == "user" else None
++    shell = tool is not None
++    args = '{"cmd":"ls"}' if tool == "shell" else '{"cmd":"echo kvotum-tool-ok"}'  # exec_command: Codex CLI
++    if b.get("stream") and shell:  # a tool call streamed in pieces, as OpenAI does
++        def ch(delta, finish=None):
++            return f'data: {json.dumps({"id": "x", "object": "chat.completion.chunk", "model": b["model"], "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})}\n\n'
++        async def g():
++            yield ch({"role": "assistant"})
++            yield ch({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": tool, "arguments": ""}}]})
++            yield ch({"tool_calls": [{"index": 0, "function": {"arguments": args[:7]}}]})
++            yield ch({"tool_calls": [{"index": 0, "function": {"arguments": args[7:]}}]})
++            yield ch({}, "tool_calls")
++            yield f'data: {json.dumps({"id": "x", "object": "chat.completion.chunk", "model": b["model"], "choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 8, "total_tokens": 48}})}\n\n'
++            yield "data: [DONE]\n\n"
++        return StreamingResponse(g(), media_type="text/event-stream")
+     if b.get("stream"):
++        last_msg = b["messages"][-1]
++        words = ["Привет", ", ", "мир"]
++        if last_msg["role"] == "tool":  # answer with what the tool returned, so a client loop is visible end to end
++            words = ["tool said: ", str(last_msg.get("content"))[:300]]
+         async def g():
+-            for w in ["Привет", ", ", "мир"]:
++            for w in words:
+                 yield f'data: {json.dumps({"id":"x","object":"chat.completion.chunk","model":b["model"],"choices":[{"index":0,"delta":{"content":w},"finish_reason":None}]})}\n\n'
+             yield f'data: {json.dumps({"id":"x","object":"chat.completion.chunk","model":b["model"],"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})}\n\n'
+             if (b.get("stream_options") or {}).get("include_usage"):
+-                yield f'data: {json.dumps({"id":"x","object":"chat.completion.chunk","model":b["model"],"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}})}\n\n'
++                u = {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
++                if has(b, "messages"):
++                    u["prompt_tokens_details"] = {"cached_tokens": 6}
++                yield f'data: {json.dumps({"id":"x","object":"chat.completion.chunk","model":b["model"],"choices":[],"usage":u})}\n\n'
+             yield "data: [DONE]\n\n"
+         return StreamingResponse(g(), media_type="text/event-stream")
++    usage = {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
++    if has(b, "messages"):
++        usage["prompt_tokens_details"] = {"cached_tokens": 800}
++    if shell:
++        msg = {"role": "assistant", "content": None, "tool_calls": [
++            {"id": "call_1", "type": "function", "function": {"name": tool, "arguments": args}}]}
++        return {"id": "x", "object": "chat.completion", "model": b["model"],
++                "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}], "usage": usage}
+     return {"id": "x", "object": "chat.completion", "model": b["model"],
+             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok:" + b["model"]}, "finish_reason": "stop"}],
+-            "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}}
++            "usage": usage}
++
++
++@app.post("/oa/v1/responses")
++async def oa_responses(req: Request):
++    b = await req.json()
++    assert req.headers["authorization"].startswith("Bearer sk-up")
++    LAST["oa_resp"] = {"headers": dict(req.headers), "body": b}
++    usage = {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1000}, "output_tokens": 30,
++             "output_tokens_details": {"reasoning_tokens": 10}, "total_tokens": 1230}
++    msg = {"type": "message", "id": "msg_up", "status": "completed", "role": "assistant",
++           "content": [{"type": "output_text", "text": "resp:" + b["model"], "annotations": []}]}
++    resp = {"id": "resp_up", "object": "response", "status": "completed", "model": b["model"], "output": [msg], "usage": usage}
++    if not b.get("stream"):
++        return resp
++    evs = [("response.created", {"response": {**resp, "status": "in_progress", "output": [], "usage": None}}),
++           ("response.output_item.added", {"output_index": 0, "item": {**msg, "status": "in_progress", "content": []}}),
++           ("response.content_part.added", {"item_id": "msg_up", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
++           ("response.output_text.delta", {"item_id": "msg_up", "output_index": 0, "content_index": 0, "delta": "resp:"}),
++           ("response.output_text.delta", {"item_id": "msg_up", "output_index": 0, "content_index": 0, "delta": b["model"]}),
++           ("response.output_item.done", {"output_index": 0, "item": msg}),
++           ("response.completed", {"response": resp})]
++    async def g():
++        for t, d in evs:
++            yield f"event: {t}\ndata: {json.dumps({'type': t, **d})}\n\n"
++    return StreamingResponse(g(), media_type="text/event-stream")
+ 
+ 
+ @app.post("/oa/v1/embeddings")
+@@ -55,8 +126,11 @@ async def an_messages(req: Request):
+     b = await req.json()
+     assert req.headers["x-api-key"] == "sk-up-anthropic"
+     assert all(m["role"] in ("user", "assistant") for m in b["messages"])
++    LAST["an"] = {"headers": dict(req.headers), "body": b}
++    cached = has(b, "system")
+     if b.get("stream"):
+-        evs = [{"type": "message_start", "message": {"id": "msg1", "model": b["model"], "usage": {"input_tokens": 20, "output_tokens": 1}}},
++        start_usage = {**AN_CACHED, "output_tokens": 1} if cached else {"input_tokens": 20, "output_tokens": 1}
++        evs = [{"type": "message_start", "message": {"id": "msg1", "model": b["model"], "usage": start_usage}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " world"}},
+@@ -71,4 +145,13 @@ async def an_messages(req: Request):
+     if b.get("tools"):
+         content.append({"type": "tool_use", "id": "toolu_1", "name": b["tools"][0]["name"], "input": {"city": "Moscow"}})
+     return {"id": "msg1", "type": "message", "role": "assistant", "model": b["model"], "content": content,
+-            "stop_reason": "tool_use" if b.get("tools") else "end_turn", "usage": {"input_tokens": 2000, "output_tokens": 1000}}
++            "stop_reason": "tool_use" if b.get("tools") else "end_turn",
++            "usage": {**AN_CACHED, "output_tokens": 50} if cached else {"input_tokens": 2000, "output_tokens": 1000}}
++
++
++@app.post("/an/v1/messages/count_tokens")
++async def an_count(req: Request):
++    b = await req.json()
++    assert req.headers["x-api-key"] == "sk-up-anthropic"
++    LAST["an_count"] = {"headers": dict(req.headers), "body": b}
++    return {"input_tokens": 42}
