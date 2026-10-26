@@ -1,0 +1,936 @@
+diff --git a/README.md b/README.md
+index 9c62e5f..fee37cb 100644
+--- a/README.md
++++ b/README.md
+@@ -77,7 +77,9 @@ print(client.chat.completions.create(model="claude-sonnet-4", messages=[{"role":
+ 
+ Эндпоинты: `/v1/chat/completions` (в т.ч. stream), `/v1/responses` (Responses API — нужен Codex CLI), `/v1/messages` и `/v1/messages/count_tokens` (Anthropic-формат — Claude Code), `/v1/embeddings`, `/v1/models`, `/v1/balance`.
+ 
+-Claude Code и Codex CLI: готовые настройки — в кабинете, раздел «Документация». Для моделей не от OpenAI шлюз переводит Responses API в их формат; заголовки `anthropic-beta`/`anthropic-version` уходят провайдеру Anthropic как есть. Кеш промптов тарифицируется отдельно: по умолчанию чтение — 10% цены входа у Anthropic и 50% у остальных, запись — 125% у Anthropic; доли можно задать для каждой модели. Swagger: `/api/docs`.
++Claude Code и Codex CLI: готовые настройки — в кабинете, раздел «Документация». Для моделей не от OpenAI шлюз переводит Responses API в их формат; заголовки `anthropic-beta`/`anthropic-version` уходят провайдеру Anthropic как есть. Кеш промптов тарифицируется отдельно: по умолчанию чтение — 10% цены входа у Anthropic и 50% у остальных, запись — 125% у Anthropic; доли можно задать для каждой модели.
++
++Кабинет клиента показывает деньги в рублях по курсу «рублей за $1» из настроек биллинга (баланс по-прежнему хранится в USD, поэтому после смены курса суммы в кабинете пересчитаются). У каждого API-ключа можно задать лимит расходов на всё время, сутки или месяц (по московскому времени), список разрешённых моделей, срок действия и свой лимит запросов в минуту; `/v1/balance` показывает состояние ключа и причину, если запросы не пройдут. Swagger: `/api/docs`.
+ 
+ ## 6. Важно
+ - Перепродажа доступа к API может противоречить условиям OpenAI/Anthropic и др. — проверьте условия провайдеров (или используйте агрегаторы/провайдеров, разрешающих реселлинг).
+@@ -92,6 +94,7 @@ uvicorn tests.mock_upstream:app --port 9001 &   # фейковые провай
+ ALLOW_PASSWORD_SIGNUP=1 DATA_DIR=./data_test ALLOW_PRIVATE_PROVIDER_URLS=1 ADMIN_EMAIL=admin@test.io ADMIN_PASSWORD=adminpass123 uvicorn app.main:app --port 8000 &
+ python tests/e2e.py
+ PYTHONPATH=. python tests/agents_test.py   # Claude Code / Codex: заголовки, кеш, /v1/responses
++python tests/keys_test.py                 # ограничения ключей, суммы в рублях
+ PYTHONPATH=. python tests/oauth_test.py
+ ```
+ 
+diff --git a/app/api_user.py b/app/api_user.py
+index f750304..c2e805e 100644
+--- a/app/api_user.py
++++ b/app/api_user.py
+@@ -1,14 +1,16 @@
+ """Auth + client cabinet API."""
+ import datetime as dt
++import json
+ import re
++from typing import Literal
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Request
+ from fastapi.responses import Response, StreamingResponse
+-from pydantic import BaseModel
++from pydantic import BaseModel, Field
+ from sqlalchemy import desc, func, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from . import errors, growth, payments, receipts, settings_store
++from . import errors, growth, keys, payments, receipts, settings_store
+ from .billing import cache_mults, sale_prices, to_nano, usd
+ from .db import get_session
+ from .models import ApiKey, Model, Payment, Provider, Referral, RequestLog, Transaction, User, now
+@@ -157,19 +159,60 @@ async def change_password(data: PasswordIn, user: User = Depends(current_user),
+ # ---------------- API keys
+ class KeyIn(BaseModel):
+     name: str = "default"
+-    spend_limit: float | None = None
++    spend_limit: float | None = Field(None, ge=0)  # USD; the cabinet converts from rubles
++    limit_period: Literal["total", "day", "month"] = "total"
++    allowed_models: list[str] = []
++    expires_on: dt.date | None = None  # last day the key works (Moscow time)
++    rpm_limit: int | None = Field(None, ge=1, le=100_000)
+ 
+ 
+ class KeyPatch(BaseModel):
++    """Only the fields that are sent change; null clears spend_limit, expires_on and rpm_limit."""
+     name: str | None = None
+     is_active: bool | None = None
+-    spend_limit: float | None = None
++    spend_limit: float | None = Field(None, ge=0)
+     clear_limit: bool = False
++    limit_period: Literal["total", "day", "month"] | None = None
++    allowed_models: list[str] | None = None
++    expires_on: dt.date | None = None
++    rpm_limit: int | None = Field(None, ge=1, le=100_000)
++
++
++async def models_json(session, ids: list[str]) -> str:
++    ids = list(dict.fromkeys(i.strip() for i in ids if i and i.strip()))
++    if len(ids) > 200:
++        raise HTTPException(400, "Можно выбрать не больше 200 моделей")
++    if ids:
++        known = set((await session.execute(select(Model.public_id).where(Model.public_id.in_(ids)))).scalars())
++        if bad := [i for i in ids if i not in known]:
++            raise HTTPException(400, f"Таких моделей нет в каталоге: {', '.join(bad[:5])}")
++    return json.dumps(ids, ensure_ascii=False) if ids else ""
++
++
++def expiry(day: dt.date | None) -> dt.datetime | None:
++    if day is None:
++        return None
++    at = keys.expires_at_of(day)
++    if at <= now():
++        raise HTTPException(400, "Дата окончания уже прошла")
++    return at
++
++
++async def set_period(session, k: ApiKey, period: str):
++    """Switching the period counts what the key has already spent in the new day or month."""
++    k.limit_period = period
++    k.period_start = keys.period_start(period)
++    k.period_spent = await keys.spent_since(session, k.id, k.period_start) if k.id else 0
+ 
+ 
+ def key_out(k: ApiKey) -> dict:
++    reset = keys.next_reset(k.limit_period)
+     return {"id": k.id, "name": k.name, "display": k.display, "is_active": k.is_active,
+             "spend_limit": usd(k.spend_limit) if k.spend_limit is not None else None, "spent": usd(k.spent),
++            "limit_period": k.limit_period, "period_spent": usd(keys.current_spent(k)),
++            "limit_resets_at": reset.isoformat() if reset else None, "allowed_models": keys.models_of(k),
++            "expires_on": keys.expires_on_of(k.expires_at), "expired": bool(k.expires_at and k.expires_at <= now()),
++            "rpm_limit": k.rpm_limit,
+             "created_at": k.created_at.isoformat(), "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None}
+ 
+ 
+@@ -186,7 +229,10 @@ async def create_key(data: KeyIn, user: User = Depends(current_user), session: A
+         raise HTTPException(400, "Максимум 50 ключей")
+     raw, h, disp = new_api_key()
+     k = ApiKey(user_id=user.id, name=(data.name or "key").strip()[:100], key_hash=h, display=disp,
+-               spend_limit=to_nano(data.spend_limit) if data.spend_limit else None)
++               spend_limit=to_nano(data.spend_limit) if data.spend_limit else None,
++               allowed_models=await models_json(session, data.allowed_models), expires_at=expiry(data.expires_on),
++               rpm_limit=data.rpm_limit)
++    await set_period(session, k, data.limit_period)
+     session.add(k)
+     await session.commit()
+     return {**key_out(k), "key": raw}
+@@ -202,10 +248,19 @@ async def patch_key(key_id: int, data: KeyPatch, user: User = Depends(current_us
+         k.name = data.name.strip()[:100]
+     if data.is_active is not None:
+         k.is_active = data.is_active
++    sent = data.model_fields_set
+     if data.clear_limit:
+         k.spend_limit = None
+-    elif data.spend_limit is not None:
+-        k.spend_limit = to_nano(data.spend_limit)
++    elif "spend_limit" in sent:
++        k.spend_limit = to_nano(data.spend_limit) if data.spend_limit else None
++    if data.limit_period is not None and data.limit_period != k.limit_period:
++        await set_period(session, k, data.limit_period)
++    if data.allowed_models is not None:
++        k.allowed_models = await models_json(session, data.allowed_models)
++    if "expires_on" in sent:
++        k.expires_at = expiry(data.expires_on)
++    if "rpm_limit" in sent:
++        k.rpm_limit = data.rpm_limit
+     await session.commit()
+     return key_out(k)
+ 
+@@ -363,7 +418,7 @@ async def my_payments(user: User = Depends(current_user), session: AsyncSession
+ 
+ # ---------------- CSV export
+ CSV_COLS = ["Дата (UTC)", "ID запроса", "Ключ", "Модель", "Endpoint", "Stream", "Токены вход", "Токены выход",
+-            "Стоимость, USD", "Задержка, мс", "Статус"]
++            "Стоимость, USD", "Стоимость, ₽", "Задержка, мс", "Статус"]
+ 
+ 
+ def _csv_cell(v) -> str:
+@@ -381,6 +436,7 @@ async def export_usage(days: int = 30, date_from: str = "", date_to: str = "", u
+     if until:
+         cond.append(RequestLog.created_at < until)
+     names = dict((await session.execute(select(ApiKey.id, ApiKey.name).where(ApiKey.user_id == user.id))).all())
++    rate = float((await settings_store.get(session, "billing")).get("usd_rub_rate") or 95)
+     rows = (await session.execute(select(RequestLog).where(*cond).order_by(RequestLog.id).limit(200_000))).scalars().all()
+ 
+     def gen():
+@@ -389,7 +445,8 @@ async def export_usage(days: int = 30, date_from: str = "", date_to: str = "", u
+             yield ";".join(_csv_cell(x) for x in [
+                 r.created_at.strftime("%Y-%m-%d %H:%M:%S"), r.request_id, names.get(r.api_key_id, "Удалённый ключ"),
+                 r.model, r.endpoint, "да" if r.stream else "нет", r.prompt_tokens, r.completion_tokens,
+-                f"{usd(r.price):.9f}".replace(".", ","), r.latency_ms, r.status_code]) + "\r\n"
++                f"{usd(r.price):.9f}".replace(".", ","), f"{usd(r.price) * rate:.6f}".replace(".", ","),
++                r.latency_ms, r.status_code]) + "\r\n"
+ 
+     fname = f"usage_{since.date()}_{((until - dt.timedelta(days=1)) if until else now()).date()}.csv"
+     return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
+@@ -409,6 +466,7 @@ async def receipt_response(session, p: Payment, user: User) -> Response:
+     if p.status != "paid":
+         raise HTTPException(400, "Квитанция доступна только для оплаченных платежей")
+     g = await settings_store.get(session, "general")
+-    pdf = receipts.render(p, user, g, usd(await growth.find_topup_bonus(session, p)))
++    rate = float((await settings_store.get(session, "billing")).get("usd_rub_rate") or 95)
++    pdf = receipts.render(p, user, g, usd(await growth.find_topup_bonus(session, p)), rate)
+     return Response(pdf, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="receipt_{p.id[:8]}.pdf"'})
+diff --git a/app/billing.py b/app/billing.py
+index 7382c70..263feb4 100644
+--- a/app/billing.py
++++ b/app/billing.py
+@@ -70,7 +70,8 @@ async def record(*, request_id, user_id, api_key_id, model_name, provider_id, pr
+             await s.execute(update(User).where(User.id == user_id).values(balance=User.balance - price))
+         if api_key_id:
+             await s.execute(update(ApiKey).where(ApiKey.id == api_key_id)
+-                            .values(spent=ApiKey.spent + price, last_used_at=now()))
++                            .values(spent=ApiKey.spent + price, period_spent=ApiKey.period_spent + price,
++                                    last_used_at=now()))
+         if provider_key_id and status_code < 400:
+             await s.execute(update(ProviderKey).where(ProviderKey.id == provider_key_id)
+                             .values(uses=ProviderKey.uses + 1, spent=ProviderKey.spent + cost,
+diff --git a/app/keys.py b/app/keys.py
+new file mode 100644
+index 0000000..0cc4457
+--- /dev/null
++++ b/app/keys.py
+@@ -0,0 +1,111 @@
++"""API key restrictions: spending limit per period, allowed models, expiry date and the key's own rate limit.
++
++Days and months follow Moscow time (UTC+3, no daylight saving), as the service's customers do."""
++import datetime as dt
++import json
++
++from sqlalchemy import func, or_, select, update
++
++from . import errors
++from .models import NANO, ApiKey, RequestLog, User, now
++
++MSK = dt.timedelta(hours=3)
++PERIODS = ("total", "day", "month")
++PERIOD_TEXT = {"day": "дневной", "month": "месячный"}
++
++
++def period_start(period: str, t: dt.datetime | None = None) -> dt.datetime | None:
++    """Start of the current day or month in naive UTC, None for a lifetime limit."""
++    if period not in ("day", "month"):
++        return None
++    m = ((t or now()) + MSK).replace(hour=0, minute=0, second=0, microsecond=0)
++    if period == "month":
++        m = m.replace(day=1)
++    return m - MSK
++
++
++def next_reset(period: str, t: dt.datetime | None = None) -> dt.datetime | None:
++    s = period_start(period, t)
++    if s is None:
++        return None
++    m = s + MSK
++    m = m + dt.timedelta(days=1) if period == "day" else (m.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
++    return m - MSK
++
++
++def expires_at_of(day: dt.date) -> dt.datetime:
++    """A key valid «until 31.12» works through that whole day in Moscow."""
++    return dt.datetime.combine(day + dt.timedelta(days=1), dt.time()) - MSK
++
++
++def expires_on_of(at: dt.datetime | None) -> str | None:
++    return ((at + MSK) - dt.timedelta(days=1)).date().isoformat() if at else None
++
++
++def models_of(k: ApiKey) -> list[str]:
++    try:
++        v = json.loads(k.allowed_models or "[]")
++    except ValueError:
++        return []
++    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
++
++
++def current_spent(k: ApiKey, t: dt.datetime | None = None) -> int:
++    """Spend counted against the limit: lifetime, or the current day / month (0 if it has not been rolled yet)."""
++    ps = period_start(k.limit_period, t)
++    if ps is None:
++        return k.spent or 0
++    return 0 if k.period_start is None or k.period_start < ps else (k.period_spent or 0)
++
++
++async def roll_period(s, k: ApiKey) -> int:
++    """Start a new day or month for the key when the current one is over; returns current_spent()."""
++    ps = period_start(k.limit_period)
++    if ps is not None and (k.period_start is None or k.period_start < ps):
++        # conditional, so concurrent requests reset the counter once and keep each other's charges
++        await s.execute(update(ApiKey).where(ApiKey.id == k.id, or_(ApiKey.period_start.is_(None), ApiKey.period_start < ps))
++                        .values(period_start=ps, period_spent=0))
++        await s.commit()
++        await s.refresh(k)
++    return current_spent(k)
++
++
++async def spent_since(s, key_id: int, since: dt.datetime | None) -> int:
++    if since is None:
++        return 0
++    return int((await s.execute(select(func.coalesce(func.sum(RequestLog.price), 0))
++                                .where(RequestLog.api_key_id == key_id, RequestLog.created_at >= since))).scalar() or 0)
++
++
++def rub_text(nano: int | None, rate: float) -> str:
++    """User-facing amount: balances are kept in USD and shown in rubles at the top-up rate."""
++    s = f"{(nano or 0) / NANO * rate:,.2f}".replace(",", " ").replace(".", ",")
++    return s.removesuffix(",00") + " ₽"
++
++
++def msk_text(t: dt.datetime) -> str:
++    return (t + MSK).strftime("%d.%m.%Y %H:%M")
++
++
++def problem(k: ApiKey, user: User | None, rate: float, spent: int) -> tuple | None:
++    """First reason the key cannot make paid requests, as GatewayError arguments (status, message, type, code)."""
++    if not k.is_active:
++        return (401, f"API-ключ «{k.name}» отключён. Включите его или создайте новый: {errors.KEYS_URL}",
++                "authentication_error", "invalid_api_key")
++    if k.expires_at and k.expires_at <= now():
++        return (401, f"Срок действия ключа «{k.name}» закончился {msk_text(k.expires_at)} по Москве. Продлите его или "
++                     f"создайте новый: {errors.KEYS_URL}", "authentication_error", "key_expired")
++    if not user or user.is_blocked:
++        return 403, "Аккаунт заблокирован. Обратитесь в поддержку.", "permission_error", "account_blocked"
++    if user.balance <= 0:
++        return (402, f"Недостаточно средств: на балансе {rub_text(user.balance, rate)}. Пополните баланс: "
++                     f"{errors.BILLING_URL}", "insufficient_quota", "insufficient_balance")
++    if k.spend_limit is not None and spent >= k.spend_limit:
++        used = f"{rub_text(spent, rate)} из {rub_text(k.spend_limit, rate)}"
++        if k.limit_period in PERIOD_TEXT:
++            msg = (f"Ключ «{k.name}» израсходовал {PERIOD_TEXT[k.limit_period]} лимит: {used}. Лимит обновится "
++                   f"{msk_text(next_reset(k.limit_period))} по Москве, увеличить его можно здесь: {errors.KEYS_URL}")
++        else:
++            msg = f"Ключ «{k.name}» израсходовал свой лимит: {used}. Увеличьте лимит: {errors.KEYS_URL}"
++        return 402, msg, "insufficient_quota", "key_limit_reached"
++    return None
+diff --git a/app/main.py b/app/main.py
+index 9f71326..eb058ec 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -23,6 +23,9 @@ STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
+ NEW_COLUMNS = {
+     "models": {"cache_read_mult": "FLOAT", "cache_write_mult": "FLOAT"},
+     "request_logs": {"cache_read_tokens": "INTEGER NOT NULL DEFAULT 0", "cache_write_tokens": "INTEGER NOT NULL DEFAULT 0"},
++    "api_keys": {"limit_period": "VARCHAR(10) NOT NULL DEFAULT 'total'", "period_spent": "BIGINT NOT NULL DEFAULT 0",
++                 "period_start": "TIMESTAMP", "allowed_models": "TEXT NOT NULL DEFAULT ''", "expires_at": "TIMESTAMP",
++                 "rpm_limit": "INTEGER"},
+ }
+ 
+ 
+diff --git a/app/models.py b/app/models.py
+index 3e8ed44..8012e92 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -38,6 +38,13 @@ class ApiKey(Base):
+     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+     spend_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+     spent: Mapped[int] = mapped_column(BigInteger, default=0)
++    # restrictions, see app/keys.py
++    limit_period: Mapped[str] = mapped_column(String(10), default="total", server_default="total")  # total | day | month
++    period_spent: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
++    period_start: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
++    allowed_models: Mapped[str] = mapped_column(Text, default="", server_default="")  # JSON list of public ids, empty = all
++    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
++    rpm_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+ 
+diff --git a/app/proxy.py b/app/proxy.py
+index 761d27c..b09aebd 100644
+--- a/app/proxy.py
++++ b/app/proxy.py
+@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
+ from fastapi.responses import JSONResponse, StreamingResponse
+ from sqlalchemy import select, update
+ 
+-from . import errors, settings_store
++from . import errors, keys, settings_store
+ from .adapters import (AnthropicStreamToOpenAI, Usage, anthropic_to_openai, anthropic_usage_of, estimate_tokens,
+                        openai_to_anthropic, openai_usage_of)
+ from .billing import cache_mults, calc_usage, record, record_bg, sale_prices, usd
+@@ -109,26 +109,16 @@ async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",),
+                                 f"Создать ключ: {errors.KEYS_URL}", "authentication_error", "missing_api_key")
+     async with SessionLocal() as s:
+         key = (await s.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw)))).scalar_one_or_none()
+-        if not key or not key.is_active:
+-            if key and not key.is_active:
+-                raise GatewayError(401, f"API-ключ «{key.name}» отключён. Включите его или создайте новый: "
+-                                        f"{errors.KEYS_URL}", "authentication_error", "invalid_api_key")
++        if not key:
+             raise GatewayError(401, "API-ключ не найден. Проверьте, что он скопирован полностью, или создайте "
+                                     f"новый: {errors.KEYS_URL}", "authentication_error", "invalid_api_key")
+         user = await s.get(User, key.user_id)
+-        if not user or user.is_blocked:
+-            raise GatewayError(403, "Аккаунт заблокирован. Обратитесь в поддержку.", "permission_error",
+-                               "account_blocked")
+-        if user.balance <= 0:
+-            raise GatewayError(402, f"Недостаточно средств: на балансе ${usd(user.balance):.2f}. "
+-                                    f"Пополните баланс: {errors.BILLING_URL}", "insufficient_quota",
+-                               "insufficient_balance")
+-        if key.spend_limit is not None and key.spent >= key.spend_limit:
+-            raise GatewayError(402, f"Ключ «{key.name}» израсходовал свой лимит: ${usd(key.spent):.2f} из "
+-                                    f"${usd(key.spend_limit):.2f}. Увеличьте лимит: {errors.KEYS_URL}",
+-                               "insufficient_quota", "key_limit_reached")
++        rate = float((await settings_store.get(s, "billing")).get("usd_rub_rate") or 95)
++        if bad := keys.problem(key, user, rate, await keys.roll_period(s, key)):
++            raise GatewayError(*bad)
+         general = await settings_store.get(s, "general")
+-        rpm = int(general.get("rate_limit_rpm") or 0)
++        rpms = [x for x in (int(general.get("rate_limit_rpm") or 0), key.rpm_limit or 0) if x > 0]
++        rpm = min(rpms) if rpms else 0  # the service-wide limit and the key's own, whichever is stricter
+         if rpm > 0 and metered:
+             q, t = _rate[key.id], time.monotonic()
+             while q and q[0] < t - 60:
+@@ -156,6 +146,11 @@ async def resolve(request: Request, body: dict, endpoint: str, kinds=("chat",),
+                                                                  Model.kind.in_(kinds)))).scalars().all()
+             raise GatewayError(404, errors.model_not_found(name, list(ids)), "invalid_request_error",
+                                "model_not_found")
++        allowed = keys.models_of(key)
++        if allowed and model.public_id not in allowed:
++            raise GatewayError(403, f"Ключ «{key.name}» не открывает модель «{name}». Ему доступны: "
++                                    f"{', '.join(allowed[:10])}{' и другие' if len(allowed) > 10 else ''}. Изменить список: "
++                                    f"{errors.KEYS_URL}", "permission_error", "model_not_allowed")
+         markup = user.markup if user.markup is not None else general.get("default_markup", 0)
+         ctx = Ctx(user, key, model, markup, "req_" + secrets.token_hex(12), client_ip(request), endpoint)
+         ctx.fwd = {h: v for h in ("anthropic-version", "anthropic-beta") if (v := request.headers.get(h))}
+@@ -620,25 +615,44 @@ async def embeddings(request: Request):
+ 
+ 
+ # --------------------------------------------------------------------------- /v1/models, /v1/balance
++def raw_key(request: Request) -> str:
++    auth = request.headers.get("authorization", "")
++    return auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
++
++
+ @router.get("/models")
+-async def list_models():
++async def list_models(request: Request):
++    """Public catalog; with a key that is limited to some models, only those (Claude Code model discovery)."""
++    allowed = []
+     async with SessionLocal() as s:
++        if raw := raw_key(request):
++            key = (await s.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw)))).scalar_one_or_none()
++            allowed = keys.models_of(key) if key else []
+         rows = (await s.execute(select(Model).where(Model.is_enabled == True).order_by(Model.public_id))).scalars()
+         data = [{"id": m.public_id, "object": "model", "created": int(m.created_at.timestamp()),
+                  "owned_by": m.family or "gateway", "display_name": m.display_name or m.public_id,
+-                 "context_length": m.context_length} for m in rows]
++                 "context_length": m.context_length} for m in rows if not allowed or m.public_id in allowed]
+     return {"object": "list", "data": data}
+ 
+ 
+ @router.get("/balance")
+ async def balance(request: Request):
+-    auth = request.headers.get("authorization", "")
+-    raw = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "")
++    """Balance and key state; «ready» tells whether paid requests with this key would pass right now."""
+     async with SessionLocal() as s:
+-        key = (await s.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw)))).scalar_one_or_none()
++        key = (await s.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key(request))))).scalar_one_or_none()
+         if not key:
+             return error_response(GatewayError(401, "API-ключ не найден. Создайте ключ: " + errors.KEYS_URL,
+                                                "authentication_error", "invalid_api_key"))
+         user = await s.get(User, key.user_id)
+-        return {"balance_usd": usd(user.balance), "key_spent_usd": usd(key.spent),
+-                "key_limit_usd": usd(key.spend_limit) if key.spend_limit is not None else None}
++        rate = float((await settings_store.get(s, "billing")).get("usd_rub_rate") or 95)
++        spent = await keys.roll_period(s, key)
++        bad = keys.problem(key, user, rate, spent)
++        reset = keys.next_reset(key.limit_period)
++        return {"balance_usd": usd(user.balance), "balance_rub": round(usd(user.balance) * rate, 2),
++                "key_spent_usd": usd(key.spent),
++                "key_limit_usd": usd(key.spend_limit) if key.spend_limit is not None else None,
++                "key_name": key.name, "key_active": key.is_active, "key_limit_period": key.limit_period,
++                "key_period_spent_usd": usd(spent), "key_limit_resets_at": reset.isoformat() + "Z" if reset else None,
++                "key_expires_at": key.expires_at.isoformat() + "Z" if key.expires_at else None,
++                "key_allowed_models": keys.models_of(key), "key_rpm_limit": key.rpm_limit,
++                "ready": bad is None, "problem": bad[1] if bad else None}
+diff --git a/app/receipts.py b/app/receipts.py
+index 4c24aad..2fe748f 100644
+--- a/app/receipts.py
++++ b/app/receipts.py
+@@ -9,7 +9,7 @@ FONTS = pathlib.Path(__file__).resolve().parent / "fonts"
+ METHOD = {"platega": "СБП / банковская карта (Platega)", "cryptobot": "Криптовалюта (CryptoBot)"}
+ 
+ 
+-def render(p, user, general: dict, bonus: float = 0.0) -> bytes:
++def render(p, user, general: dict, bonus: float = 0.0, rate: float = 95.0) -> bytes:
+     pdf = FPDF(format="A4")
+     pdf.set_auto_page_break(True, 15)
+     pdf.add_font("Sans", "", str(FONTS / "LiberationSans-Regular.ttf"))
+@@ -40,17 +40,20 @@ def render(p, user, general: dict, bonus: float = 0.0) -> bytes:
+     else:
+         amount = f"{p.amount:,.2f} {p.currency}".replace(",", " ")
+     credited = usd(p.amount_usd)
++    # the balance is shown in rubles: a ruble payment credits exactly what was paid, other currencies the service rate
++    kurs = p.amount / credited if p.currency == "RUB" and credited else rate
++    rubles = lambda v: f"{v * kurs:,.2f} руб.".replace(",", " ")
+     rows = [
+         ("Плательщик", user.email if user else "—"),
+         ("Назначение", f"Пополнение баланса на сервисе {site}"),
+         ("Способ оплаты", METHOD.get(p.method, p.method)),
+         ("Сумма оплаты", amount),
+-        ("Зачислено на баланс", f"${credited:,.2f}".replace(",", " ")),
++        ("Зачислено на баланс", rubles(credited)),
+     ]
+-    if p.currency == "RUB" and credited:
+-        rows.append(("Курс", f"{p.amount / credited:.2f} руб. за $1"))
++    if p.currency != "RUB":
++        rows.append(("Курс", f"{rate:,.2f} руб. за $1".replace(",", " ")))
+     if bonus > 0:
+-        rows.append(("Бонус к пополнению", f"+${bonus:,.2f}".replace(",", " ")))
++        rows.append(("Бонус к пополнению", "+" + rubles(bonus)))
+     rows += [("Статус", "Оплачено"), ("ID платежа", p.id)]
+     if p.external_id:
+         rows.append(("ID у платёжной системы", p.external_id))
+diff --git a/app/seo.py b/app/seo.py
+index a50714a..de6b049 100644
+--- a/app/seo.py
++++ b/app/seo.py
+@@ -21,7 +21,7 @@ from .models import now
+ 
+ router = APIRouter(include_in_schema=False)
+ STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
+-ASSET_V = "23"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
++ASSET_V = "24"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
+ # Self-hosted (static/fonts): no third-party requests; the two Onest files cover the first paint of Russian text.
+ FONTS = ('<link rel="preload" href="/static/fonts/Onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>'
+          '<link rel="preload" href="/static/fonts/Onest-latin.woff2" as="font" type="font/woff2" crossorigin>'
+diff --git a/static/app.js b/static/app.js
+index 5797978..53af5ea 100644
+--- a/static/app.js
++++ b/static/app.js
+@@ -36,8 +36,12 @@ const money = (v, d) => { v = Number(v || 0); const a = Math.abs(v);
+   if (d === undefined) d = a === 0 ? 2 : a < 0.01 ? 6 : a < 1 ? 4 : 2;
+   return (v < 0 ? '-$' : '$') + a.toLocaleString('en-US', { minimumFractionDigits: Math.min(d, 2), maximumFractionDigits: d }); };
+ const RATE = () => (typeof S !== 'undefined' && S.cfg && +S.cfg.usd_rub_rate) || 95;
+-const rub = (v, d = 2) => { const x = Number(v || 0) * RATE();
+-  return (Math.abs(x - Math.round(x)) < 0.005 ? Math.round(x) : x).toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: d }) + ' ₽'; };
++// The cabinet shows money in rubles: balances are kept in USD and shown at the top-up rate, the rate payments are credited at.
++// money() stays for the admin pages, where purchase prices are in USD.
++const rubv = (x, d) => { x = Number(x || 0); const a = Math.abs(x);
++  if (d === undefined) d = a === 0 || a >= 1 ? 2 : a >= 0.01 ? 3 : 4; // a request can cost a fraction of a kopeck
++  return (a >= 1 && Math.abs(x - Math.round(x)) < 0.005 ? Math.round(x) : x).toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: d }) + ' ₽'; };
++const rub = (v, d) => rubv(Number(v || 0) * RATE(), d);
+ const tok = n => { n = Number(n || 0); return n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : String(n); };
+ const nf = n => Number(n || 0).toLocaleString(I18N.locale());
+ const dt = s => s ? new Date(s + (s.endsWith('Z') || s.includes('+') ? '' : 'Z')).toLocaleString(I18N.locale(), { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
+@@ -148,7 +152,7 @@ function barList(rows, val, label, fmt) { const max = Math.max(1e-9, ...rows.map
+ function fillDays(daily, days) { const map = Object.fromEntries(daily.map(d => [d.date, d])), out = [];
+   for (let i = days - 1; i >= 0; i--) { const d = new Date(Date.now() - i * 864e5).toISOString().slice(0, 10); out.push(map[d] || { date: d, requests: 0, revenue: 0, cost: 0, tokens: 0 }); } return out; }
+ function countUp(root) { $$('[data-count]', root).forEach(el => { const end = +el.dataset.count, f = el.dataset.fmt, t0 = performance.now(), orig = el.textContent;
+-  const fm = v => f === 'money' ? money(v, 2) : f === 'tok' ? tok(Math.round(v)) : f === 'pct' ? v.toFixed(1) + '%' : nf(Math.round(v));
++  const fm = v => f === 'money' ? money(v, 2) : f === 'rub' ? rub(v, 2) : f === 'tok' ? tok(Math.round(v)) : f === 'pct' ? v.toFixed(1) + '%' : nf(Math.round(v));
+   if (REDUCED()) { el.textContent = fm(end); return; }
+   const step = t => { const k = Math.min(1, (t - t0) / 1100), e = k === 1 ? 1 : 1 - Math.pow(2, -10 * k); el.textContent = k === 1 && orig !== '0' ? orig : fm(end * e); if (k < 1 && el.isConnected) requestAnimationFrame(step); }; requestAnimationFrame(step); }); }
+ 
+@@ -170,6 +174,10 @@ function integrations(base, origin, m, key, site, ids = []) {
+       step(2, `Передайте ключ через переменную окружения (в PowerShell: ${mono(`$env:${envk}="${key}"`)}):`) + codeBlock(`export ${envk}=${key}`) +
+       step(3, `Запустите ${mono('codex')}.`) +
+       '<div class="alert info small mt">Подходит любая чат-модель каталога. Запросы к моделям не от OpenAI шлюз сам переводит из Responses API в их формат.</div>' },
++    cline: { name: 'Cline', html: li(['Откройте Cline → шестерёнка <b>Settings</b>.', '<b>API Provider</b>: выберите <b>OpenAI Compatible</b>.', `<b>Base URL</b>: ${mono(base)} ${copyBtn(base)}`, `<b>API Key</b>: ${mono(key)}`, `<b>Model ID</b>: ${mono(m)} ${copyBtn(m)}`, 'Нажмите <b>Done</b>.']) },
++    roo: { name: 'Roo Code', html: li(['Откройте Roo Code → шестерёнка <b>Settings → Providers</b>.', '<b>API Provider</b>: выберите <b>OpenAI Compatible</b>.', `<b>Base URL</b>: ${mono(base)} ${copyBtn(base)}`, `<b>API Key</b>: ${mono(key)}`, `<b>Model</b>: ${mono(m)} ${copyBtn(m)}`, 'Сохраните профиль.']) },
++    aider: { name: 'Aider', html: li(['Передайте адрес и ключ через переменные окружения:']) +
++      codeBlock(`export OPENAI_API_BASE=${base}\nexport OPENAI_API_KEY=${key}`) + li([`Запустите, добавив ${mono('openai/')} перед ID модели:`]) + codeBlock(`aider --model openai/${m}`) },
+     cursor: { name: 'Cursor', html: li(['Откройте <b>Cursor Settings → Models</b>.', `В блоке <b>API Keys</b> вставьте ключ в поле <b>OpenAI API Key</b>: ${mono(key)}`, `Включите <b>Override OpenAI Base URL</b> и укажите ${mono(base)} ${copyBtn(base)}`, `Нажмите <b>+ Add Custom Model</b>, введите ${mono(m)} ${copyBtn(m)} и включите её.`, 'Нажмите <b>Verify</b>. Если проверка падает, временно отключите в списке остальные модели.']) +
+       '<div class="alert warn small mt">Cursor ходит к API через свои серверы, поэтому шлюз должен быть доступен из интернета по HTTPS. Адрес localhost работать не будет.</div>' },
+     continue: { name: 'Continue', html: li(['Откройте панель Continue → шестерёнка → <b>Open config file</b> (файл <span class="mono">~/.continue/config.yaml</span>).', 'Добавьте модель в раздел <span class="mono">models</span> и сохраните файл:']) +
+@@ -222,7 +230,7 @@ function renderShell(path, r) {
+   $('#app').innerHTML = `<div class="shell"><aside class="side" id="side">
+     <div class="brand"><div class="logo">${LOGO}</div><span>${esc(S.cfg.site_name)}</span>${isAdmin ? '<span class="tag-admin">Admin</span>' : ''}</div>
+     <nav class="nav"><span class="nav-ind" aria-hidden="true"></span>${isAdmin ? navHtml(ADMIN_NAV) + `<div class="sec">Кабинет</div><a href="#/dashboard">${ic('home')}Мой кабинет</a>` : navHtml(USER_NAV) + (u.role === 'admin' ? `<div class="sec">Управление</div><a href="#/admin">${ic('shield')}Админ-панель</a>` : '')}</nav>
+-    <div class="side-foot"><a class="bal" href="#/billing"><span class="small muted">Баланс</span><b class="num" id="side-bal">${money(u.balance)}</b></a>
++    <div class="side-foot"><a class="bal" href="#/billing"><span class="small muted">Баланс</span><b class="num" id="side-bal">${rub(u.balance)}</b></a>
+     <div class="row between"><div style="min-width:0"><div class="small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.email)}</div></div><button class="btn sm icon ghost" id="lo" title="Выйти">${ic('out')}</button></div></div></aside>
+     <div class="main"><header class="top"><button class="btn sm icon ghost burger" id="bg">${ic('menu')}</button><div class="crumbs grow">${isAdmin ? 'Админ-панель' : 'Кабинет'} / <b>${esc(r.title || '')}</b></div>
+     ${langSw()}<button class="btn sm icon ghost" id="th" title="Тема">${ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon')}</button></header>
+@@ -246,7 +254,7 @@ function themeSwitch(btn) {
+   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+   setTheme(next); btn.innerHTML = ic(next === 'dark' ? 'sun' : 'moon');
+ }
+-async function refreshMe() { try { S.user = await api('/api/me'); const b = $('#side-bal'); if (b) b.textContent = money(S.user.balance); } catch {} }
++async function refreshMe() { try { S.user = await api('/api/me'); const b = $('#side-bal'); if (b) b.textContent = rub(S.user.balance); } catch {} }
+ const pageHead = (title, sub = '', actions = '') => `<div class="page-h"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div><div class="row wrap">${actions}</div></div>`;
+ 
+ // =====================================================================  PUBLIC
+@@ -286,34 +294,97 @@ route('/dashboard', async (el) => {
+   const month = st.totals.revenue;
+   el.innerHTML = pageHead('Обзор', 'Ваш баланс, расходы и быстрый старт', `<a class="btn pri" href="#/billing">${ic('plus')}Пополнить</a>`) +
+     (fk ? `<div class="card mb" style="border-color:var(--accent)"><div class="card-h"><h3>Ваш первый API-ключ</h3><button class="btn sm ghost" id="hidefk">Скрыть</button></div><div class="keybox"><span class="grow">${esc(fk)}</span>${copyBtn(fk)}</div><p class="small warn" style="margin:8px 0 0">Сохраните ключ — он показывается только один раз.</p></div>` : '') +
+-    `<div class="grid g4"><div class="card kpi kpi-hero"><span class="kpi-ic">${ic('wallet')}</span><div class="l">Баланс</div><div class="v" data-count="${u.balance}" data-fmt="money">${money(u.balance)}</div><div class="d"><a href="#/billing" style="color:var(--link)">Пополнить →</a></div></div>
+-    <div class="card kpi"><span class="kpi-ic">${ic('zap')}</span><div class="l">Потрачено сегодня</div><div class="v" data-count="${st.today_spent}" data-fmt="money">${money(st.today_spent)}</div></div>
+-    <div class="card kpi"><span class="kpi-ic">${ic('chart')}</span><div class="l">За 30 дней</div><div class="v" data-count="${month}" data-fmt="money">${money(month)}</div><div class="d muted">${nf(st.totals.requests)} запросов</div></div>
++    `<div class="grid g4"><div class="card kpi kpi-hero"><span class="kpi-ic">${ic('wallet')}</span><div class="l">Баланс</div><div class="v" data-count="${u.balance}" data-fmt="rub">${rub(u.balance)}</div><div class="d"><a href="#/billing" style="color:var(--link)">Пополнить →</a></div></div>
++    <div class="card kpi"><span class="kpi-ic">${ic('zap')}</span><div class="l">Потрачено сегодня</div><div class="v" data-count="${st.today_spent}" data-fmt="rub">${rub(st.today_spent)}</div></div>
++    <div class="card kpi"><span class="kpi-ic">${ic('chart')}</span><div class="l">За 30 дней</div><div class="v" data-count="${month}" data-fmt="rub">${rub(month)}</div><div class="d muted">${nf(st.totals.requests)} запросов</div></div>
+     <div class="card kpi"><span class="kpi-ic">${ic('layers')}</span><div class="l">Токены за 30 дней</div><div class="v" data-count="${st.totals.prompt_tokens + st.totals.completion_tokens}" data-fmt="tok">0</div><div class="d muted">вход ${tok(st.totals.prompt_tokens)} · выход ${tok(st.totals.completion_tokens)}</div></div></div>
+-    <div class="grid g2 mt"><div class="card"><div class="card-h"><h3>Расход по дням</h3>${legend([['USD', '#FF5B1F']])}</div>${areaChart(days.map(d => d.date), [{ name: 'Расход', color: '#FF5B1F', data: days.map(d => d.revenue) }], { fmt: v => money(v, 2) })}</div>
+-    <div class="card"><div class="card-h"><h3>По моделям</h3></div>${barList(st.by_model, r => r.revenue, r => r.model, r => money(r.revenue))}</div></div>
++    <div class="grid g2 mt"><div class="card"><div class="card-h"><h3>Расход по дням</h3>${legend([['₽', '#FF5B1F']])}</div>${areaChart(days.map(d => d.date), [{ name: 'Расход', color: '#FF5B1F', data: days.map(d => d.revenue * RATE()) }], { fmt: v => rubv(v) })}</div>
++    <div class="card"><div class="card-h"><h3>По моделям</h3></div>${barList(st.by_model, r => r.revenue, r => r.model, r => rub(r.revenue))}</div></div>
+     <div class="grid g2 mt"><div class="card"><div class="card-h"><h3>Быстрый старт</h3><a class="small" style="color:var(--link)" href="#/docs">Документация →</a></div>${codeBlock(`curl ${location.origin}/v1/chat/completions \\\n  -H "Authorization: Bearer $API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Привет!"}]}'`)}</div>
+-    <div class="card"><div class="card-h"><h3>Последние запросы</h3><a class="small" style="color:var(--link)" href="#/logs">Все →</a></div>${logs.length ? `<table class="compact"><tbody>${logs.map(l => `<tr><td class="mono">${esc(l.model)}</td><td class="num muted">${tok(l.prompt_tokens + l.completion_tokens)}</td><td class="num r">${money(l.price)}</td><td>${statusBadge(l.status_code)}</td></tr>`).join('')}</tbody></table>` : empty('list', 'Запросов пока нет', 'Сделайте первый запрос по примеру слева')}</div></div>`;
++    <div class="card"><div class="card-h"><h3>Последние запросы</h3><a class="small" style="color:var(--link)" href="#/logs">Все →</a></div>${logs.length ? `<table class="compact"><tbody>${logs.map(l => `<tr><td class="mono">${esc(l.model)}</td><td class="num muted">${tok(l.prompt_tokens + l.completion_tokens)}</td><td class="num r">${rub(l.price)}</td><td>${statusBadge(l.status_code)}</td></tr>`).join('')}</tbody></table>` : empty('list', 'Запросов пока нет', 'Сделайте первый запрос по примеру слева')}</div></div>`;
+   countUp(el); const h = $('#hidefk'); if (h) h.onclick = () => { sessionStorage.removeItem('first_key'); render(); };
+ }, { auth: true, title: 'Обзор' });
+ 
++// ---------- API keys: spending limit per period, allowed models, expiry, own rate limit (app/keys.py)
++const PERIOD = { total: 'на всё время', day: 'в сутки', month: 'в месяц' };
++const plural = (n, f) => f[n % 10 === 1 && n % 100 !== 11 ? 0 : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 1 : 2];
++const dmy = d => d ? d.split('-').reverse().join('.') : '';
++function keyForm(k, models) {
++  k = k || { name: '', spend_limit: null, limit_period: 'total', allowed_models: [], expires_on: null, rpm_limit: null };
++  const sel = new Set(k.allowed_models), ids = [...new Set([...models.map(m => m.id), ...k.allowed_models])];
++  const today = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10); // Moscow date
++  return new Promise(res => {
++    const md = modal(k.id ? 'Настройки ключа' : 'Новый API-ключ', `<form class="col" id="kf">
++      <div class="field"><label>Название</label><input class="inp" name="name" value="${esc(k.name)}" placeholder="Например: мой бот" maxlength="100"></div>
++      <div class="grid g2"><div class="field"><label>Лимит расходов, ₽</label><input class="inp" name="limit" type="number" min="0" step="any" value="${k.spend_limit != null ? +(k.spend_limit * RATE()).toFixed(2) : ''}" placeholder="без лимита"></div>
++        <div class="field"><label>Период лимита</label><select class="inp" name="period">${Object.entries(PERIOD).map(([v, t]) => `<option value="${v}" ${v === k.limit_period ? 'selected' : ''}>${t}</option>`).join('')}</select></div></div>
++      <div class="small dim" style="margin-top:-6px">Когда лимит исчерпан, ключ перестаёт принимать запросы до конца периода. Сутки и месяц считаются по московскому времени.</div>
++      <div class="field"><label>Модели</label><div class="pills" id="kmm"><button type="button" data-mm="all" class="${sel.size ? '' : 'on'}">Все модели</button><button type="button" data-mm="some" class="${sel.size ? 'on' : ''}">Только выбранные</button></div>
++        <div id="kml" ${sel.size ? '' : 'hidden'}><input class="inp mt" id="kmq" type="search" placeholder="Поиск модели" autocomplete="off"><div class="mlist" id="kmb">${ids.map(id => `<label class="chk" data-id="${esc(id.toLowerCase())}"><input type="checkbox" value="${esc(id)}" ${sel.has(id) ? 'checked' : ''}><span class="mono">${esc(id)}</span></label>`).join('')}</div><div class="hint" id="kmn"></div></div></div>
++      <div class="grid g2"><div class="field"><label>Действует до</label><input class="inp" name="exp" type="date" min="${today}" value="${k.expires_on || ''}"><div class="hint">Включительно. Пусто — бессрочно</div></div>
++        <div class="field"><label>Запросов в минуту</label><input class="inp" name="rpm" type="number" min="1" step="1" value="${k.rpm_limit ?? ''}" placeholder="без отдельного лимита"><div class="hint">Только для этого ключа</div></div></div>
++    </form>`, { foot: `<button class="btn" data-c>Отмена</button><button class="btn pri" data-o>${k.id ? 'Сохранить' : 'Создать ключ'}</button>` });
++    let mode = sel.size ? 'some' : 'all';
++    const f = $('#kf', md), cnt = () => { const n = $$('#kmb input:checked', md).length; $('#kmn', md).textContent = n ? `Выбрано: ${n}` : 'Отметьте хотя бы одну модель'; };
++    $$('[data-mm]', md).forEach(b => b.onclick = () => { mode = b.dataset.mm; $$('[data-mm]', md).forEach(x => x.classList.toggle('on', x === b)); $('#kml', md).hidden = mode === 'all'; });
++    $('#kmq', md).oninput = e => { const q = e.target.value.trim().toLowerCase(); $$('#kmb [data-id]', md).forEach(l => { l.hidden = !!q && !l.dataset.id.includes(q); }); };
++    $('#kmb', md).onchange = cnt; cnt();
++    const done = () => { const d = Object.fromEntries(new FormData(f)), chosen = $$('#kmb input:checked', md).map(i => i.value), lim = +d.limit;
++      if (mode === 'some' && !chosen.length) { toast('Отметьте хотя бы одну модель или выберите «Все модели»', 'err'); return; }
++      md.close(); res({ name: d.name.trim() || 'key', spend_limit: lim > 0 ? lim / RATE() : null, clear_limit: !(lim > 0), limit_period: d.period,
++        allowed_models: mode === 'some' ? chosen : [], expires_on: d.exp || null, rpm_limit: +d.rpm > 0 ? Math.round(+d.rpm) : null }); };
++    f.onsubmit = e => { e.preventDefault(); done(); };
++    $('[data-o]', md).onclick = done; $('[data-c]', md).onclick = () => { md.close(); res(null); };
++    setTimeout(() => $('[name=name]', md).focus(), 50);
++  });
++}
++// Shown once after creation: the key, a live check and ready-made configs with the key already filled in.
++function keyCreated(k, models) {
++  const chat = models.filter(m => m.kind === 'chat'), ok = k.allowed_models.length ? chat.filter(m => k.allowed_models.includes(m.id)) : chat;
++  const ids = ok.map(m => m.id), m0 = (ok.find(m => m.popular) || ok[0] || {}).id || 'gpt-4o-mini', mc = ids.find(i => /claude/i.test(i)) || m0;
++  const base = location.origin + '/v1', site = S.cfg.site_name || 'Gateway', a = integrations(base, location.origin, m0, k.key, site, ids);
++  const apps = { curl: { name: 'curl', html: codeBlock(`curl ${base}/chat/completions \\\n  -H "Authorization: Bearer ${k.key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "${m0}", "messages": [{"role": "user", "content": "Привет!"}]}'`) },
++    claude: integrations(base, location.origin, mc, k.key, site, ids).claude, codex: a.codex, cursor: a.cursor, cline: a.cline };
++  let app = 'curl';
++  const md = modal('Ключ создан', `<div class="keybox"><span class="grow">${esc(k.key)}</span>${copyBtn(k.key)}</div><div class="alert warn mt">Скопируйте и сохраните ключ — он показывается <b>только один раз</b>.</div>
++    <div class="kchk mt"><span id="kchk" class="small muted">Проверьте, что ключ принимается и запросы пройдут.</span><button class="btn sm" id="kck">${ic('check')}Проверить ключ</button></div>
++    <h3 class="mt2">Подключение</h3><div class="pills mt" id="kap" style="flex-wrap:wrap"></div><div id="kab" class="mt"></div>`, { size: 'lg' });
++  const draw = () => { $('#kap', md).innerHTML = Object.entries(apps).map(([id, v]) => `<button class="${id === app ? 'on' : ''}" data-ka="${id}">${v.name}</button>`).join('');
++    $('#kab', md).innerHTML = apps[app].html; $$('[data-ka]', md).forEach(b => b.onclick = () => { app = b.dataset.ka; draw(); }); };
++  draw();
++  $('#kck', md).onclick = e => busy(e.currentTarget, async () => {
++    const out = $('#kchk', md);
++    try {
++      const r = await fetch('/v1/balance', { headers: { Authorization: 'Bearer ' + k.key } }), d = await r.json();
++      out.innerHTML = !r.ok ? `<span class="err">${esc(d.error?.message || 'Ключ не принят')}</span>`
++        : d.ready ? `<span class="ok">Ключ работает. На балансе ${rub(d.balance_usd)}.</span>`
++        : `<span class="warn">Ключ принят, но запросы пока не пройдут: ${esc(d.problem)}</span>${d.balance_usd <= 0 ? ' <a href="#/billing" style="color:var(--link)">Пополнить →</a>' : ''}`;
++    } catch { out.innerHTML = '<span class="err">Не удалось связаться с API</span>'; }
++  });
++}
+ route('/keys', async (el) => {
++  let models = [];
+   const load = async () => {
+-    const keys = await api('/api/me/keys');
+-    el.innerHTML = pageHead('API-ключи', 'Используйте ключ в заголовке Authorization: Bearer', `<button class="btn pri" id="nk">${ic('plus')}Создать ключ</button>`) +
+-      (keys.length ? `<div class="tbl-wrap"><table><thead><tr><th>Название</th><th>Ключ</th><th class="r">Потрачено</th><th class="r">Лимит</th><th>Использован</th><th>Активен</th><th></th></tr></thead><tbody>${keys.map(k => `<tr>
+-        <td><b>${esc(k.name)}</b><div class="small dim">${dt(k.created_at)}</div></td><td class="mono">${esc(k.display)}</td><td class="r num">${money(k.spent)}</td>
+-        <td class="r num">${k.spend_limit != null ? money(k.spend_limit) : '<span class="dim">∞</span>'}</td><td class="muted small">${ago(k.last_used_at)}</td>
+-        <td>${sw(`data-tg="${k.id}"`, k.is_active)}</td><td class="r"><button class="btn sm ghost" data-ed="${k.id}">${ic('edit')}</button><button class="btn sm ghost" data-del="${k.id}">${ic('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
++    const [keys, ms] = await Promise.all([api('/api/me/keys'), models.length ? models : api('/api/public/models').catch(() => [])]); models = ms;
++    const used = k => k.limit_period === 'total' ? k.spent : k.period_spent;
++    const limit = k => { if (k.spend_limit == null) return '<span class="dim">без лимита</span>';
++      const p = Math.min(100, used(k) / k.spend_limit * 100);
++      return `${rub(used(k))} <span class="dim">из ${rub(k.spend_limit)}${k.limit_period === 'total' ? '' : ' ' + PERIOD[k.limit_period]}</span><div class="kbar ${p >= 100 ? 'full' : ''}"><i style="width:${p}%"></i></div>`; };
++    const rules = k => [k.allowed_models.length ? `<span class="badge" title="${esc(k.allowed_models.join(', '))}">${k.allowed_models.length === 1 ? esc(k.allowed_models[0]) : `${k.allowed_models.length} ${plural(k.allowed_models.length, ['модель', 'модели', 'моделей'])}`}</span>` : '',
++      k.expires_on ? `<span class="badge ${k.expired ? 'err' : ''}">${k.expired ? 'истёк' : 'до'} ${dmy(k.expires_on)}</span>` : '',
++      k.rpm_limit ? `<span class="badge">${nf(k.rpm_limit)}/мин</span>` : ''].filter(Boolean).join(' ') || '<span class="dim">нет</span>';
++    el.innerHTML = pageHead('API-ключи', 'Ключ передаётся в заголовке Authorization: Bearer. Для каждого можно задать лимит, модели и срок действия.', `<button class="btn pri" id="nk">${ic('plus')}Создать ключ</button>`) +
++      (keys.length ? `<div class="tbl-wrap"><table><thead><tr><th>Название</th><th>Ключ</th><th class="r">Потрачено</th><th>Лимит</th><th>Ограничения</th><th>Использован</th><th>Активен</th><th></th></tr></thead><tbody>${keys.map(k => `<tr>
++        <td><b>${esc(k.name)}</b><div class="small dim">${dt(k.created_at)}</div></td><td class="mono">${esc(k.display)}</td><td class="r num">${rub(k.spent)}</td>
++        <td class="num klim">${limit(k)}</td><td>${rules(k)}</td><td class="muted small">${ago(k.last_used_at)}</td>
++        <td>${sw(`data-tg="${k.id}"`, k.is_active)}</td><td class="r nowrap"><button class="btn sm ghost" data-ed="${k.id}" title="Настройки">${ic('edit')}</button><button class="btn sm ghost" data-del="${k.id}" title="Удалить">${ic('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
+         : `<div class="card">${empty('key', 'Ключей пока нет', 'Создайте ключ, чтобы начать работу с API', '<button class="btn pri" onclick="$(\'#nk\').click()">Создать ключ</button>')}</div>`);
+-    $('#nk').onclick = async () => { const d = await promptBox('Новый API-ключ', [{ name: 'name', label: 'Название', placeholder: 'Например: мой бот' }, { name: 'limit', label: 'Лимит расходов, $', type: 'number', hint: 'Необязательно. Ключ перестанет работать при достижении лимита' }], 'Создать');
+-      if (!d) return; try { const k = await api('/api/me/keys', { body: { name: d.name || 'key', spend_limit: d.limit ? +d.limit : null } });
+-        modal('Ключ создан', `<div class="keybox"><span class="grow">${esc(k.key)}</span>${copyBtn(k.key)}</div><div class="alert warn mt">Скопируйте и сохраните ключ — он показывается <b>только один раз</b>.</div>`); load(); } catch (e) { fail(e); } };
++    $('#nk').onclick = async () => { const d = await keyForm(null, models); if (!d) return;
++      try { const k = await api('/api/me/keys', { body: d }); keyCreated(k, models); load(); } catch (e) { fail(e); } };
+     $$('[data-tg]').forEach(i => i.onchange = () => api('/api/me/keys/' + i.dataset.tg, { method: 'PATCH', body: { is_active: i.checked } }).then(() => toast(i.checked ? 'Ключ включён' : 'Ключ отключён')).catch(fail));
+     $$('[data-del]').forEach(b => b.onclick = async () => { if (await confirmBox('Удалить ключ? Приложения, использующие его, перестанут работать.', { ok: 'Удалить' })) api('/api/me/keys/' + b.dataset.del, { method: 'DELETE' }).then(() => { toast('Ключ удалён'); load(); }).catch(fail); });
+-    $$('[data-ed]').forEach(b => b.onclick = async () => { const k = keys.find(x => x.id == b.dataset.ed);
+-      const d = await promptBox('Изменить ключ', [{ name: 'name', label: 'Название', value: k.name }, { name: 'limit', label: 'Лимит расходов, $', type: 'number', value: k.spend_limit ?? '', hint: 'Пусто — без лимита' }]);
+-      if (d) api('/api/me/keys/' + k.id, { method: 'PATCH', body: { name: d.name, spend_limit: d.limit ? +d.limit : null, clear_limit: !d.limit } }).then(() => { toast('Сохранено'); load(); }).catch(fail); });
++    $$('[data-ed]').forEach(b => b.onclick = async () => { const k = keys.find(x => x.id == b.dataset.ed), d = await keyForm(k, models);
++      if (d) api('/api/me/keys/' + k.id, { method: 'PATCH', body: d }).then(() => { toast('Сохранено'); load(); }).catch(fail); });
+   };
+   el.innerHTML = skel(1, 200); load().catch(fail);
+ }, { auth: true, title: 'API-ключи' });
+@@ -369,25 +440,25 @@ route('/billing', async (el, p, q) => {
+   el.innerHTML = skel(2, 160);
+   const [methods, pays, txs] = await Promise.all([api('/api/pay/methods'), api('/api/me/payments'), api('/api/me/transactions')]);
+   await refreshMe(); let m = methods[0], amount = m?.presets?.[1] || 0;
+-  el.innerHTML = pageHead('Баланс', 'Пополнение и история операций') + `<div class="grid g2"><div class="card"><div class="l muted small">Текущий баланс</div><div style="font-size:36px;font-weight:600;letter-spacing:-.03em" class="num">${money(S.user.balance)}</div></div>
++  el.innerHTML = pageHead('Баланс', 'Пополнение и история операций') + `<div class="grid g2"><div class="card"><div class="l muted small">Текущий баланс</div><div style="font-size:36px;font-weight:600;letter-spacing:-.03em" class="num">${rub(S.user.balance)}</div></div>
+     <div class="card" id="topup">${methods.length ? '' : empty('card', 'Оплата пока не настроена', 'Свяжитесь с поддержкой для пополнения')}</div></div>
+     <div class="tabs mt2"><button class="on" data-t="p">Платежи</button><button data-t="t">Операции</button></div><div id="hist"></div>`;
+   const drawTop = () => { if (!methods.length) return;
+     const usdv = m.currency === 'RUB' ? amount / m.rate : amount, tiers = S.cfg.topup_bonus || [];
+     const pct = tiers.reduce((p, [a, x]) => usdv >= a ? x : p, 0), bon = usdv * pct / 100, nextT = tiers.find(([a]) => usdv < a);
+-    const tierHint = tiers.length ? `<div class="alert info ico small mt">${ic('gift')}<span>Бонус к пополнению: ${tiers.map(([a, x]) => `от $${a} <b>+${x}%</b>`).join(', ')}${nextT ? ` · до +${nextT[1]}% не хватает ${m.currency === 'RUB' ? nf(Math.ceil((nextT[0] - usdv) * m.rate)) + ' ₽' : money(nextT[0] - usdv, 2)}` : ''}</span></div>` : '';
++    const tierHint = tiers.length ? `<div class="alert info ico small mt">${ic('gift')}<span>Бонус к пополнению: ${tiers.map(([a, x]) => `от ${m.currency === 'RUB' ? rub(a, 0) : '$' + a} <b>+${x}%</b>`).join(', ')}${nextT ? ` · до +${nextT[1]}% не хватает ${m.currency === 'RUB' ? nf(Math.ceil((nextT[0] - usdv) * m.rate)) + ' ₽' : money(nextT[0] - usdv, 2)}` : ''}</span></div>` : '';
+     $('#topup').innerHTML = `<h3>Пополнить баланс</h3><div class="field mt"><label>Способ оплаты</label><div class="grid g2">${methods.map(x => `<div class="preset ${x.id === m.id ? 'on' : ''}" data-m="${x.id}">${ic(x.id === 'cryptobot' ? 'globe' : 'card')}${esc(x.title)}</div>`).join('')}</div></div>
+       <div class="field mt"><label>Сумма, ${m.currency === 'RUB' ? '₽' : '$'}</label><div class="row wrap">${m.presets.map(a => `<button class="btn amount-btn ${a == amount ? 'on' : ''}" data-a="${a}">${m.currency === 'RUB' ? nf(a) + ' ₽' : '$' + a}</button>`).join('')}</div>
+-      <input class="inp mt" id="amt" type="number" min="${m.min}" step="any" value="${amount}"><div class="hint">Минимум ${m.min} ${m.currency}${m.currency === 'RUB' ? ` · курс ${m.rate} ₽ = $1` : ''}</div></div>
+-      ${tierHint}<div class="row between mt"><span class="muted">Будет зачислено: <b class="num" style="color:var(--tx)">${money(usdv + bon, 2)}</b>${bon ? ` <span class="ok small">(в т. ч. бонус +${pct}%: ${money(bon, 2)})</span>` : ''}</span><button class="btn pri" id="pay">Перейти к оплате</button></div>`;
++      <input class="inp mt" id="amt" type="number" min="${m.min}" step="any" value="${amount}"><div class="hint">Минимум ${m.currency === 'RUB' ? nf(m.min) + ' ₽' : '$' + m.min}${m.currency === 'RUB' ? '' : ` · $1 = ${rub(1)} на балансе`}</div></div>
++      ${tierHint}<div class="row between mt"><span class="muted">Будет зачислено: <b class="num" style="color:var(--tx)">${rub(usdv + bon)}</b>${bon ? ` <span class="ok small">(в т. ч. бонус +${pct}%: ${rub(bon)})</span>` : ''}</span><button class="btn pri" id="pay">Перейти к оплате</button></div>`;
+     $$('[data-m]').forEach(b => b.onclick = () => { m = methods.find(x => x.id === b.dataset.m); amount = m.presets[1]; drawTop(); });
+     $$('[data-a]').forEach(b => b.onclick = () => { amount = +b.dataset.a; drawTop(); });
+     $('#amt').onchange = e => { amount = +e.target.value; drawTop(); };
+     $('#pay').onclick = e => busy(e.currentTarget, async () => { const r = await api('/api/pay/create', { body: { method: m.id, amount } });
+       window.open(r.pay_url, '_blank'); waitPay(r.payment_id, r.pay_url); }); };
+   const drawHist = t => { $$('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+-    $('#hist').innerHTML = t === 'p' ? (pays.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Способ</th><th class="r">Сумма</th><th class="r">Зачислено</th><th>Статус</th><th></th></tr></thead><tbody>${pays.map(x => `<tr><td>${dt(x.created_at)}</td><td>${x.method === 'cryptobot' ? 'CryptoBot' : 'Platega'}</td><td class="r num">${x.amount} ${x.currency}</td><td class="r num">${money(x.amount_usd)}</td><td>${payBadge(x.status)}</td><td class="r">${x.status === 'pending' ? `<a class="btn sm" href="${esc(x.pay_url)}" target="_blank">Оплатить</a> <button class="btn sm" data-chk="${x.id}">Проверить</button>` : x.status === 'paid' ? `<button class="btn sm" data-rc="${x.id}">${ic('receipt')}Квитанция PDF</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('card', 'Платежей пока нет')}</div>`)
+-      : (txs.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Тип</th><th>Описание</th><th class="r">Сумма</th></tr></thead><tbody>${txs.map(x => `<tr><td>${dt(x.created_at)}</td><td><span class="badge">${esc(x.type)}</span></td><td class="muted">${esc(x.description)}</td><td class="r num ${x.amount > 0 ? 'ok' : 'err'}">${x.amount > 0 ? '+' : ''}${money(x.amount)}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('receipt', 'Операций пока нет')}</div>`);
++    $('#hist').innerHTML = t === 'p' ? (pays.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Способ</th><th class="r">Сумма</th><th class="r">Зачислено</th><th>Статус</th><th></th></tr></thead><tbody>${pays.map(x => `<tr><td>${dt(x.created_at)}</td><td>${x.method === 'cryptobot' ? 'CryptoBot' : 'Platega'}</td><td class="r num">${x.currency === 'RUB' ? nf(x.amount) + ' ₽' : '$' + x.amount}</td><td class="r num">${rub(x.amount_usd)}</td><td>${payBadge(x.status)}</td><td class="r">${x.status === 'pending' ? `<a class="btn sm" href="${esc(x.pay_url)}" target="_blank">Оплатить</a> <button class="btn sm" data-chk="${x.id}">Проверить</button>` : x.status === 'paid' ? `<button class="btn sm" data-rc="${x.id}">${ic('receipt')}Квитанция PDF</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('card', 'Платежей пока нет')}</div>`)
++      : (txs.length ? `<div class="tbl-wrap"><table><thead><tr><th>Дата</th><th>Тип</th><th>Описание</th><th class="r">Сумма</th></tr></thead><tbody>${txs.map(x => `<tr><td>${dt(x.created_at)}</td><td><span class="badge">${esc(x.type)}</span></td><td class="muted">${esc(x.description)}</td><td class="r num ${x.amount > 0 ? 'ok' : 'err'}">${x.amount > 0 ? '+' : ''}${rub(x.amount)}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('receipt', 'Операций пока нет')}</div>`);
+     $$('[data-rc]').forEach(b => b.onclick = () => busy(b, () => download(`/api/me/payments/${b.dataset.rc}/receipt.pdf`, 'receipt.pdf')));
+     $$('[data-chk]').forEach(b => b.onclick = () => busy(b, async () => { const r = await api(`/api/pay/${b.dataset.chk}/check`); toast(r.status === 'paid' ? 'Платёж зачислен!' : r.status === 'pending' ? 'Оплата ещё не поступила' : 'Платёж отменён', r.status === 'paid' ? 'ok' : 'err'); if (r.status !== 'pending') render(); })); };
+   $$('.tabs button').forEach(b => b.onclick = () => drawHist(b.dataset.t)); drawTop(); drawHist('p');
+@@ -404,7 +475,7 @@ function waitPay(id, url) {
+ 
+ route('/logs', async (el) => {
+   let off = 0; const load = async () => { const logs = await api(`/api/me/logs?limit=50&offset=${off}`);
+-    el.innerHTML = pageHead('История запросов', 'Каждый запрос к API и его стоимость') + (logs.length || off ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Модель</th><th>Endpoint</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Стоимость</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${logs.map(l => `<tr><td class="muted">${dt(l.created_at)}</td><td class="mono">${esc(l.model)}</td><td class="small muted">${esc(l.endpoint)}${l.stream ? ' · stream' : ''}</td><td class="r num">${nf(l.prompt_tokens)}${l.cached_tokens ? `<div class="small dim">из кеша ${nf(l.cached_tokens)}</div>` : ''}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${money(l.price)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td title="${esc(l.error || '')}">${statusBadge(l.status_code)}${l.error ? ` <span class="small muted">${esc(l.error)}</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
++    el.innerHTML = pageHead('История запросов', 'Каждый запрос к API и его стоимость') + (logs.length || off ? `<div class="tbl-wrap"><table class="compact"><thead><tr><th>Время</th><th>Модель</th><th>Endpoint</th><th class="r">Вход</th><th class="r">Выход</th><th class="r">Стоимость</th><th class="r">Задержка</th><th>Статус</th></tr></thead><tbody>${logs.map(l => `<tr><td class="muted">${dt(l.created_at)}</td><td class="mono">${esc(l.model)}</td><td class="small muted">${esc(l.endpoint)}${l.stream ? ' · stream' : ''}</td><td class="r num">${nf(l.prompt_tokens)}${l.cached_tokens ? `<div class="small dim">из кеша ${nf(l.cached_tokens)}</div>` : ''}</td><td class="r num">${nf(l.completion_tokens)}</td><td class="r num">${rub(l.price)}</td><td class="r num muted">${(l.latency_ms / 1000).toFixed(2)}s</td><td title="${esc(l.error || '')}">${statusBadge(l.status_code)}${l.error ? ` <span class="small muted">${esc(l.error)}</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
+       <div class="row mt"><button class="btn sm" id="pv" ${off ? '' : 'disabled'}>← Назад</button><button class="btn sm" id="nx" ${logs.length < 50 ? 'disabled' : ''}>Далее →</button></div>` : `<div class="card">${empty('list', 'Запросов пока нет', 'Здесь появится история обращений к API')}</div>`);
+     const pv = $('#pv'), nx = $('#nx'); if (pv) { pv.onclick = () => { off -= 50; load(); }; nx.onclick = () => { off += 50; load(); }; } };
+   el.innerHTML = skel(1, 300); load().catch(fail);
+@@ -519,11 +590,11 @@ route('/usage', async (el, p, q) => {
+     el.innerHTML = pageHead('Расходы', 'Статистика по ключам и моделям за выбранный период', `<button class="btn" id="ucsv">${ic('down')}Скачать CSV</button>`) +
+       `<div class="row wrap mb"><div class="pills">${[7, 30, 90].map(n => `<button class="${preset === n ? 'on' : ''}" data-pr="${n}">${n} дней</button>`).join('')}</div>
+       <span class="small muted">с</span><input class="inp" type="date" id="uf" value="${from}" max="${day(0)}" style="width:160px"><span class="small muted">по</span><input class="inp" type="date" id="ut" value="${to}" max="${day(0)}" style="width:160px"></div>
+-      <div id="ures"><div class="grid g4"><div class="card kpi"><div class="l">Потрачено</div><div class="v">${money(T.revenue, 2)}</div></div><div class="card kpi"><div class="l">Запросов</div><div class="v">${nf(T.requests)}</div><div class="d muted">ошибок: ${nf(T.errors)}</div></div>
++      <div id="ures"><div class="grid g4"><div class="card kpi"><div class="l">Потрачено</div><div class="v">${rub(T.revenue, 2)}</div></div><div class="card kpi"><div class="l">Запросов</div><div class="v">${nf(T.requests)}</div><div class="d muted">ошибок: ${nf(T.errors)}</div></div>
+       <div class="card kpi"><div class="l">Токены</div><div class="v">${tok(T.prompt_tokens + T.completion_tokens)}</div><div class="d muted">вход ${tok(T.prompt_tokens)} · выход ${tok(T.completion_tokens)}</div></div><div class="card kpi"><div class="l">Средняя задержка</div><div class="v">${(T.avg_latency_ms / 1000).toFixed(2)} с</div></div></div>
+-      <div class="card mt"><div class="card-h"><h3>Расход по дням</h3>${legend([['USD', '#FF5B1F']])}</div>${areaChart(days.map(d => d.date), [{ name: 'Расход', color: '#FF5B1F', data: days.map(d => d.revenue) }], { fmt: v => money(v, 2) })}</div>
+-      <div class="grid g2 mt"><div class="card"><div class="card-h"><h3>По ключам</h3><a class="small" style="color:var(--link)" href="#/keys">Ключи →</a></div>${barList(st.by_key, r => r.revenue, r => r.name, r => `${money(r.revenue)} · ${nf(r.requests)} запр.`)}</div>
+-      <div class="card"><div class="card-h"><h3>По моделям</h3></div>${barList(st.by_model, r => r.revenue, r => r.model, r => `${money(r.revenue)} · ${nf(r.requests)} запр.`)}</div></div></div>`;
++      <div class="card mt"><div class="card-h"><h3>Расход по дням</h3>${legend([['₽', '#FF5B1F']])}</div>${areaChart(days.map(d => d.date), [{ name: 'Расход', color: '#FF5B1F', data: days.map(d => d.revenue * RATE()) }], { fmt: v => rubv(v) })}</div>
++      <div class="grid g2 mt"><div class="card"><div class="card-h"><h3>По ключам</h3><a class="small" style="color:var(--link)" href="#/keys">Ключи →</a></div>${barList(st.by_key, r => r.revenue, r => r.name, r => `${rub(r.revenue)} · ${nf(r.requests)} запр.`)}</div>
++      <div class="card"><div class="card-h"><h3>По моделям</h3></div>${barList(st.by_model, r => r.revenue, r => r.model, r => `${rub(r.revenue)} · ${nf(r.requests)} запр.`)}</div></div></div>`;
+     $$('[data-pr]').forEach(b => b.onclick = () => { from = day(+b.dataset.pr - 1); to = day(0); load().catch(fail); });
+     $('#uf').onchange = e => { if (e.target.value) { from = e.target.value; if (from > to) to = from; load().catch(fail); } };
+     $('#ut').onchange = e => { if (e.target.value) { to = e.target.value; if (to < from) from = to; load().catch(fail); } };
+@@ -962,17 +1033,17 @@ route('/status', async (el) => {
+ route('/referral', async (el) => {
+   el.innerHTML = skel(2, 140); const r = await api('/api/me/referral'); if (!el.isConnected) return;
+   const link = `${location.origin}/?ref=${r.code}`;
+-  const tg = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(I18N.t(`Доступ к GPT, Claude, Gemini и другим нейросетям через один API. По моей ссылке — ${money(r.friend_bonus, 2)} на баланс`))}`;
++  const tg = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(I18N.t(`Доступ к GPT, Claude, Gemini и другим нейросетям через один API. По моей ссылке — ${rub(r.friend_bonus, 2)} на баланс`))}`;
+   el.innerHTML = pageHead('Пригласить друга', 'Делитесь ссылкой — бонусы получите вы оба') + (!r.enabled ? `<div class="card">${empty('gift', 'Программа приглашений сейчас выключена')}</div>` : `
+     <div class="grid g3">
+-      <div class="card kpi"><div class="l">Вы получите</div><div class="v">${money(r.inviter_bonus, 2)}</div><div class="small dim mt">за каждого друга${r.require_topup ? ' после его первого пополнения' : ''}</div></div>
+-      <div class="card kpi"><div class="l">Друг получит</div><div class="v">${money(r.friend_bonus, 2)}</div><div class="small dim mt">сразу после регистрации</div></div>
+-      <div class="card kpi"><div class="l">Заработано</div><div class="v ok">${money(r.earned, 2)}</div><div class="small dim mt">приглашено: ${r.invited} · с бонусом: ${r.rewarded}</div></div></div>
++      <div class="card kpi"><div class="l">Вы получите</div><div class="v">${rub(r.inviter_bonus, 2)}</div><div class="small dim mt">за каждого друга${r.require_topup ? ' после его первого пополнения' : ''}</div></div>
++      <div class="card kpi"><div class="l">Друг получит</div><div class="v">${rub(r.friend_bonus, 2)}</div><div class="small dim mt">сразу после регистрации</div></div>
++      <div class="card kpi"><div class="l">Заработано</div><div class="v ok">${rub(r.earned, 2)}</div><div class="small dim mt">приглашено: ${r.invited} · с бонусом: ${r.rewarded}</div></div></div>
+     <div class="card mt2"><h3>Ваша ссылка</h3><div class="keybox mt" style="border-style:solid;border-color:var(--bd)"><span class="grow mono">${esc(link)}</span>${copyBtn(link)}</div>
+       <div class="row wrap mt"><a class="btn" href="${tg}" target="_blank">${ic('ext')}Отправить в Telegram</a></div>
+-      <ol class="steps-ol small muted mt"><li>Друг открывает ссылку и входит через GitHub или Google.</li><li>Ему сразу приходит ${money(r.friend_bonus, 2)} на баланс.</li><li>${r.require_topup ? 'Когда друг впервые пополнит баланс, вам' : 'Вам сразу'} приходит ${money(r.inviter_bonus, 2)}.</li></ol>
++      <ol class="steps-ol small muted mt"><li>Друг открывает ссылку и входит через GitHub или Google.</li><li>Ему сразу приходит ${rub(r.friend_bonus, 2)} на баланс.</li><li>${r.require_topup ? 'Когда друг впервые пополнит баланс, вам' : 'Вам сразу'} приходит ${rub(r.inviter_bonus, 2)}.</li></ol>
+       <div class="small dim mt">Бонусы можно тратить только на запросы к API. Начисляются один раз за каждого нового пользователя.</div></div>
+-    <h3 class="mt2" style="margin-bottom:10px">Приглашённые</h3>${r.friends.length ? `<div class="tbl-wrap"><table><thead><tr><th>Друг</th><th>Дата</th><th>Статус</th><th class="r">Ваш бонус</th></tr></thead><tbody>${r.friends.map(f => `<tr><td class="mono">${esc(f.email)}</td><td>${dt(f.created_at)}</td><td>${f.rewarded ? '<span class="badge ok">Начислено</span>' : '<span class="badge">Ждём первое пополнение</span>'}</td><td class="r num">${f.rewarded ? '+' + money(f.bonus, 2) : '—'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('users', 'Пока никого', 'Отправьте ссылку другу — он появится здесь после регистрации')}</div>`}`);
++    <h3 class="mt2" style="margin-bottom:10px">Приглашённые</h3>${r.friends.length ? `<div class="tbl-wrap"><table><thead><tr><th>Друг</th><th>Дата</th><th>Статус</th><th class="r">Ваш бонус</th></tr></thead><tbody>${r.friends.map(f => `<tr><td class="mono">${esc(f.email)}</td><td>${dt(f.created_at)}</td><td>${f.rewarded ? '<span class="badge ok">Начислено</span>' : '<span class="badge">Ждём первое пополнение</span>'}</td><td class="r num">${f.rewarded ? '+' + rub(f.bonus, 2) : '—'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="card">${empty('users', 'Пока никого', 'Отправьте ссылку другу — он появится здесь после регистрации')}</div>`}`);
+ }, { auth: true, title: 'Пригласить друга' });
+ 
+ // ---------- settings
+diff --git a/static/i18n.js b/static/i18n.js
+index 023df32..1b03435 100644
+--- a/static/i18n.js
++++ b/static/i18n.js
+@@ -974,6 +974,45 @@
+ "из кеша": "cached",
+ "Кеш: чтение, ₽/1M": "Cache read, ₽/1M",
+ "Кеш: запись, ₽/1M": "Cache write, ₽/1M",
++"на всё время": "lifetime",
++"в сутки": "per day",
++"в месяц": "per month",
++"модель": "model",
++"модели": "models",
++"Настройки ключа": "Key settings",
++"Лимит расходов, ₽": "Spending limit, ₽",
++"Период лимита": "Limit period",
++"без лимита": "no limit",
++"Когда лимит исчерпан, ключ перестаёт принимать запросы до конца периода. Сутки и месяц считаются по московскому времени.": "Once the limit is reached, the key stops accepting requests until the period ends. Days and months follow Moscow time.",
++"Только выбранные": "Only selected",
++"Поиск модели": "Search models",
++"Действует до": "Valid until",
++"Включительно. Пусто — бессрочно": "Inclusive. Empty means no expiry",
++"Запросов в минуту": "Requests per minute",
++"без отдельного лимита": "no separate limit",
++"Только для этого ключа": "For this key only",
++"Отметьте хотя бы одну модель": "Select at least one model",
++"Отметьте хотя бы одну модель или выберите «Все модели»": "Select at least one model or choose «All models»",
++"Проверьте, что ключ принимается и запросы пройдут.": "Check that the key is accepted and requests will go through.",
++"Проверить ключ": "Test key",
++"Ключ не принят": "Key rejected",
++"Ключ работает. На балансе": "The key works. Balance:",
++"Ключ принят, но запросы пока не пройдут:": "The key is accepted, but requests won't go through yet:",
++"Не удалось связаться с API": "Could not reach the API",
++"Ограничения": "Restrictions",
++"истёк": "expired",
++"/мин": "/min",
++"Ключ передаётся в заголовке Authorization: Bearer. Для каждого можно задать лимит, модели и срок действия.": "Pass the key in the Authorization: Bearer header. Each key can have its own limit, models and expiry date.",
++"на балансе": "on balance",
++"Откройте Cline → шестерёнка": "Open Cline → gear icon",
++"Откройте Roo Code → шестерёнка": "Open Roo Code → gear icon",
++": выберите": ": choose",
++"Сохраните профиль.": "Save the profile.",
++"Передайте адрес и ключ через переменные окружения:": "Pass the URL and key in environment variables:",
++"Запустите, добавив": "Run it, adding",
++"перед ID модели:": "before the model ID:",
++"из": "of",
++"до": "until",
+ };
+   const CYR = /[А-Яа-яЁё]/;
+   const SKIP = 'script,style,textarea,input,pre,code,.code,.term,.tk-b,.msg,.att-n,.keybox,[data-noi18n]';
+diff --git a/static/landing.js b/static/landing.js
+index 1108699..427f258 100644
+--- a/static/landing.js
++++ b/static/landing.js
+@@ -349,7 +349,7 @@ function lpLogin(q) {
+   const o = S.cfg.oauth || {}, any = o.github || o.google;
+   modal('Вход и регистрация', `<p class="muted" style="margin:-4px 0 20px">Аккаунт создаётся автоматически при первом входе</p>
+     ${q.error ? `<div class="alert err small" style="margin-bottom:14px">${esc(q.error)}</div>` : ''}
+-    ${localStorage.getItem('ref') && S.cfg.referral?.enabled && S.cfg.referral.friend_bonus > 0 ? `<div class="alert info ico small" style="margin-bottom:14px">${ic('gift')}<span>Вас пригласил друг: после регистрации на баланс придёт <b>${money(S.cfg.referral.friend_bonus, 2)}</b> на использование API.</span></div>` : ''}
++    ${localStorage.getItem('ref') && S.cfg.referral?.enabled && S.cfg.referral.friend_bonus > 0 ? `<div class="alert info ico small" style="margin-bottom:14px">${ic('gift')}<span>Вас пригласил друг: после регистрации на баланс придёт <b>${rub(S.cfg.referral.friend_bonus)}</b> на использование API.</span></div>` : ''}
+     ${any ? `<div class="col">${o.github ? `<a class="btn oauth" href="/api/auth/oauth/github/start">${GH_SVG}Продолжить с GitHub</a>` : ''}${o.google ? `<a class="btn oauth" href="/api/auth/oauth/google/start">${G_SVG}Продолжить с Google</a>` : ''}</div>`
+       : `<div class="alert warn small">Вход временно недоступен, попробуйте позже.${S.cfg.support_contact ? ` Поддержка: <span data-noi18n>${esc(S.cfg.support_contact)}</span>` : ''}</div>`}
+     <p class="small dim" style="margin:20px 0 0">Продолжая, вы принимаете условия использования сервиса.</p>`, { size: 'auth-m' });
+diff --git a/static/style.css b/static/style.css
+index ced609d..f7d736a 100644
+--- a/static/style.css
++++ b/static/style.css
+@@ -200,3 +200,9 @@ th{font-weight:500;color:var(--tx3);text-transform:none}
+ .card{box-shadow:none}
+ .page-h h1{font-size:24px;letter-spacing:-.015em}
+ a.small[style*="var(--link)"]:hover{text-decoration:underline}
++/* API keys */
++.mlist{max-height:220px;overflow:auto;margin-top:8px;padding:6px 10px;border:1px solid var(--bd);border-radius:var(--r-sm);background:var(--bg);display:flex;flex-direction:column;gap:4px}
++.mlist .chk{padding:3px 0}.mlist .chk[hidden]{display:none}
++.kbar{height:4px;margin-top:6px;border-radius:2px;background:var(--s3);overflow:hidden;max-width:160px}.kbar i{display:block;height:100%;background:var(--accent)}.kbar.full i{background:var(--err)}
++.klim{white-space:nowrap}.nowrap{white-space:nowrap}
++.kchk{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--bd);border-radius:var(--r-sm);background:var(--s2)}
+diff --git a/tests/keys_test.py b/tests/keys_test.py
+new file mode 100644
+index 0000000..587ddb5
+--- /dev/null
++++ b/tests/keys_test.py
+@@ -0,0 +1,96 @@
++"""Run after e2e.py (DATA_DIR=data_test): key restrictions — limit per day/month, allowed models, expiry, own rate
++limit — plus /v1/balance readiness and amounts in rubles."""
++import datetime as dt
++import sqlite3
++import uuid
++
++import httpx
++
++B = "http://127.0.0.1:8000"
++c = httpx.Client(base_url=B, timeout=30)
++db = sqlite3.connect("data_test/gateway.db")
++
++
++def ok(r):
++    assert r.status_code < 400, (r.request.url, r.status_code, r.text)
++    return r.json()
++
++
++def chat(key, model="gpt-4o-mini"):
++    return c.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key}"},
++                  json={"model": model, "messages": [{"role": "user", "content": "hi"}]})
++
++
++A = {"Authorization": "Bearer " + ok(c.post("/api/auth/login", json={"email": "admin@test.io", "password": "adminpass123"}))["token"]}
++UH = {"Authorization": "Bearer " + ok(c.post("/api/auth/login", json={"email": "user@test.io", "password": "userpass123"}))["token"]}
++rate = ok(c.get("/api/public/config"))["usd_rub_rate"]
++tomorrow = (dt.datetime.utcnow() + dt.timedelta(hours=3) + dt.timedelta(days=1)).date().isoformat()
++
++# ---------------------------------------------------------------- create with every restriction
++k = ok(c.post("/api/me/keys", headers=UH, json={"name": "restricted", "spend_limit": 0.0000001, "limit_period": "day",
++                                                 "allowed_models": ["gpt-4o-mini", "gpt-4o-mini"], "expires_on": tomorrow, "rpm_limit": 3}))
++key, kid = k["key"], k["id"]
++assert (k["limit_period"], k["allowed_models"], k["expires_on"], k["rpm_limit"], k["period_spent"], k["expired"]) == \
++    ("day", ["gpt-4o-mini"], tomorrow, 3, 0, False), k
++assert k["limit_resets_at"] and k["limit_resets_at"].endswith("21:00:00"), k["limit_resets_at"]  # midnight in Moscow
++for bad in ({"allowed_models": ["no-such-model"]}, {"expires_on": "2020-01-01"}, {"limit_period": "week"}, {"rpm_limit": 0}):
++    r = c.post("/api/me/keys", headers=UH, json={"name": "bad", **bad})
++    assert r.status_code in (400, 422), (bad, r.status_code, r.text)
++
++# allowed models: other models refused, /v1/models filtered for this key only
++r = chat(key, "gpt-4o")
++assert r.status_code == 403 and r.json()["error"]["code"] == "model_not_allowed" and "gpt-4o-mini" in r.json()["error"]["message"], r.text
++assert [m["id"] for m in ok(c.get("/v1/models", headers={"Authorization": f"Bearer {key}"}))["data"]] == ["gpt-4o-mini"]
++assert len(ok(c.get("/v1/models"))["data"]) > 1
++
++# day limit: the first request may cross it, the next one is refused until the next Moscow midnight
++assert chat(key).status_code == 200
++r = chat(key)
++e = r.json()["error"]
++assert r.status_code == 402 and e["code"] == "key_limit_reached" and "дневной лимит" in e["message"] and "по Москве" in e["message"], r.text
++assert "₽" in e["message"] and "$" not in e["message"], e["message"]
++b = ok(c.get("/v1/balance", headers={"Authorization": f"Bearer {key}"}))
++assert b["ready"] is False and "дневной лимит" in b["problem"] and b["key_period_spent_usd"] > 0 and b["key_allowed_models"] == ["gpt-4o-mini"]
++assert abs(b["balance_rub"] - round(b["balance_usd"] * rate, 2)) < 0.01
++row = next(x for x in ok(c.get("/api/me/keys", headers=UH)) if x["id"] == kid)
++assert row["period_spent"] == row["spent"] > 0
++
++# yesterday's spend does not count: the period rolls over on the next request
++db.execute("update api_keys set period_start = ? where id = ?", ((dt.datetime.utcnow() - dt.timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S.%f"), kid)); db.commit()
++row = next(x for x in ok(c.get("/api/me/keys", headers=UH)) if x["id"] == kid)
++assert row["period_spent"] == 0, row
++assert chat(key).status_code == 200
++
++# switching to a monthly limit counts what was already spent this month
++r = ok(c.patch(f"/api/me/keys/{kid}", headers=UH, json={"limit_period": "month", "spend_limit": 1}))
++assert r["limit_period"] == "month" and abs(r["period_spent"] - r["spent"]) < 1e-9 and r["spent"] > 0, r
++# a partial update leaves the other restrictions alone
++r = ok(c.patch(f"/api/me/keys/{kid}", headers=UH, json={"is_active": True}))
++assert (r["spend_limit"], r["allowed_models"], r["expires_on"], r["rpm_limit"]) == (1, ["gpt-4o-mini"], tomorrow, 3), r
++
++# own rate limit: 3 per minute for this key (2 requests above were in the same minute)
++codes = [chat(key).status_code for _ in range(3)]
++assert 429 in codes, codes
++r = ok(c.patch(f"/api/me/keys/{kid}", headers=UH, json={"rpm_limit": None, "allowed_models": [], "spend_limit": None, "expires_on": None}))
++assert (r["rpm_limit"], r["allowed_models"], r["spend_limit"], r["expires_on"]) == (None, [], None, None), r
++assert chat(key, "gpt-4o").status_code == 200
++
++# expiry: refused after the last day, with the date in Moscow time
++db.execute("update api_keys set expires_at = ? where id = ?", ((dt.datetime.utcnow() - dt.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S.%f"), kid)); db.commit()
++r = chat(key)
++assert r.status_code == 401 and r.json()["error"]["code"] == "key_expired" and "по Москве" in r.json()["error"]["message"], r.text
++assert next(x for x in ok(c.get("/api/me/keys", headers=UH)) if x["id"] == kid)["expired"] is True
++assert c.patch(f"/api/me/keys/{kid}", headers=UH, json={"expires_on": "2020-01-01"}).status_code == 400
++
++# ---------------------------------------------------------------- amounts in rubles for an empty balance
++email = f"keys-{uuid.uuid4().hex[:6]}@test.io"
++u = ok(c.post("/api/auth/register", json={"email": email, "password": "keyspass123"}))
++k2 = ok(c.post("/api/me/keys", headers={"Authorization": "Bearer " + u["token"]}, json={"name": "empty"}))["key"]
++r = chat(k2)
++assert r.status_code == 402 and "на балансе 0 ₽" in r.json()["error"]["message"], r.text
++b = ok(c.get("/v1/balance", headers={"Authorization": f"Bearer {k2}"}))
++assert b["ready"] is False and b["balance_rub"] == 0 and "Недостаточно средств" in b["problem"]
++
++csv = c.get("/api/me/usage.csv?days=30", headers=UH)
++assert csv.status_code == 200 and "Стоимость, ₽" in csv.text.splitlines()[0]
++print("KEYS OK")
